@@ -3,245 +3,308 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Minecraft Lite — Three.js</title>
+  <title>Minecraft Lite</title>
 </head>
 <body>
-  <div id="ui">
-    <div id="instructions">
-      <div><strong>Minecraft Lite — Simple Three.js Demo</strong></div>
-      <div>Click to lock pointer and start. Controls: WASD move, mouse look, Space jump, Left click remove, Right click place, Scroll change block type.</div>
-      <div>Blocks: <span id="type">0</span></div>
-    </div>
-  </div>
-  <div id="hotbar"></div>
+<canvas id="game"></canvas>
+<script>
+/*
+  Minecraft Lite (2D, top-down)
+  - Single-file HTML + JS
+  - Controls: WASD to move, mouse rotates player toward cursor
+  - Left click: break block (within range)
+  - Right click: place dirt block (within range)
+  - Camera follows player
 
-  <script type="module">
-    import * as THREE from 'https://unpkg.com/three@0.158.0/build/three.module.js';
-    import { PointerLockControls } from 'https://unpkg.com/three@0.158.0/examples/jsm/controls/PointerLockControls.js';
+  Code is modular and commented for easy tweaking.
+*/
 
-    // Minimal page setup using JS for styling (no <style> block)
-    document.body.style.margin = '0';
-    document.body.style.height = '100vh';
-    document.body.style.background = '#87ceeb';
+// ======= Config =======
+const CONFIG = {
+  title: 'Minecraft Lite',
+  tileSize: 28,          // pixels per tile
+  mapW: 128,             // tiles
+  mapH: 128,             // tiles
+  viewPadding: 3,        // extra tiles to draw beyond viewport
+  playerSpeed: 160,      // pixels per second
+  breakPlaceRange: 5,    // tiles
+  seed: 12345,
+};
 
-    const ui = document.getElementById('ui');
-    ui.style.position = 'fixed';
-    ui.style.left = '10px';
-    ui.style.top = '10px';
-    ui.style.fontFamily = 'system-ui,Segoe UI,Roboto,Helvetica,Arial';
+// ======= Canvas setup =======
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+function resize() {
+  canvas.width = innerWidth;
+  canvas.height = innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
 
-    const instr = document.getElementById('instructions');
-    instr.style.background = 'rgba(255,255,255,0.9)';
-    instr.style.padding = '8px';
-    instr.style.borderRadius = '6px';
-    instr.style.maxWidth = '360px';
+// ======= Simple deterministic noise (value noise) =======
+function hash(x, y, seed=CONFIG.seed){
+  // 32-bit int hash
+  let n = x * 374761393 + y * 668265263 + seed * 1442695040888963407 >>> 0;
+  n = (n ^ (n >>> 13)) * 1274126177;
+  n = (n ^ (n >>> 16)) >>> 0;
+  return n / 4294967295;
+}
 
-    const hotbar = document.getElementById('hotbar');
-    hotbar.style.position = 'fixed';
-    hotbar.style.left = '50%';
-    hotbar.style.transform = 'translateX(-50%)';
-    hotbar.style.bottom = '14px';
-    hotbar.style.display = 'flex';
-    hotbar.style.gap = '8px';
+// ======= World generation =======
+// tile types: 0 = air, 1 = grass, 2 = dirt, 3 = stone, 4 = water
+const map = new Uint8Array(CONFIG.mapW * CONFIG.mapH);
+function generateWorld(){
+  for(let y=0;y<CONFIG.mapH;y++){
+    for(let x=0;x<CONFIG.mapW;x++){
+      // layered noise for more natural shapes
+      const n1 = hash(x, y, CONFIG.seed);
+      const n2 = (hash(x*2, y*2, CONFIG.seed+1) + n1)/2;
+      const n3 = (hash(Math.floor(x/3), Math.floor(y/3), CONFIG.seed+2) + n2)/2;
+      const n = (n1 + n2*0.7 + n3*0.4) / (1 + 0.7 + 0.4);
 
-    // ----- Basic scene setup -----
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x87ceeb);
-    const camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 1000);
+      let t = 1; // grass default
+      if(n < 0.15) t = 4;          // water
+      else if(n < 0.45) t = 1;     // grass
+      else if(n < 0.75) t = 2;     // dirt
+      else t = 3;                  // stone
 
-    const renderer = new THREE.WebGLRenderer({antialias:true});
-    renderer.setSize(innerWidth, innerHeight);
-    document.body.appendChild(renderer.domElement);
+      // carve a small player spawn clearing near center
+      const cx = Math.floor(CONFIG.mapW/2);
+      const cy = Math.floor(CONFIG.mapH/2);
+      if(Math.hypot(x-cx, y-cy) < 6) t = 1;
 
-    window.addEventListener('resize', ()=>{
-      camera.aspect = innerWidth/innerHeight;
-      camera.updateProjectionMatrix();
-      renderer.setSize(innerWidth, innerHeight);
-    });
-
-    // lights
-    const hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.9);
-    hemi.position.set(0, 200, 0);
-    scene.add(hemi);
-    const dir = new THREE.DirectionalLight(0xffffff, 0.6);
-    dir.position.set(100,100,50);
-    scene.add(dir);
-
-    // pointer lock controls
-    const controls = new PointerLockControls(camera, document.body);
-    document.addEventListener('click', ()=>{ if (!controls.isLocked) controls.lock(); });
-    controls.addEventListener('lock', ()=>{ instr.style.display='none' });
-    controls.addEventListener('unlock', ()=>{ instr.style.display='block' });
-
-    // player state
-    const player = {
-      velocity: new THREE.Vector3(),
-      direction: new THREE.Vector3(),
-      onGround: false,
-      speed: 6,
-      jumpSpeed: 8,
-      height: 1.8,
-      position: new THREE.Vector3(8,10,8)
-    };
-
-    // simple world parameters
-    const WORLD = { width: 32, depth: 32, height: 10 };
-    const map = new Uint8Array(WORLD.width * WORLD.height * WORLD.depth);
-    function idx(x,y,z){ return x + z*WORLD.width + y*WORLD.width*WORLD.depth; }
-
-    // generate heightmap (simple)
-    for(let x=0;x<WORLD.width;x++){
-      for(let z=0;z<WORLD.depth;z++){
-        const h = Math.floor(3 + Math.sin(x*0.3 + z*0.2)*2 + Math.random()*1.6);
-        for(let y=0;y<=h;y++){
-          map[idx(x,y,z)] = (y<=1) ? 2 : 1; // grass=1, dirt=2
-        }
-      }
+      map[y*CONFIG.mapW + x] = t;
     }
-    map[idx(8,9,8)] = 3;
+  }
+}
 
-    // block colors
-    const BLOCKS = [null, 0x8DB360, 0x8B5A2B, 0x999999, 0xffd27f];
+function getTile(tx, ty){
+  if(tx < 0 || ty < 0 || tx >= CONFIG.mapW || ty >= CONFIG.mapH) return 3; // treat out-of-bounds as stone
+  return map[ty*CONFIG.mapW + tx];
+}
+function setTile(tx, ty, v){
+  if(tx < 0 || ty < 0 || tx >= CONFIG.mapW || ty >= CONFIG.mapH) return;
+  map[ty*CONFIG.mapW + tx] = v;
+}
+function tileSolid(t){
+  // define which tiles block movement: all non-air and non-water
+  return t !== 0 && t !== 4;
+}
 
-    // Build mesh with exposed-face culling
-    let worldMesh = null;
-    function rebuildWorldMesh(){
-      if (worldMesh) { scene.remove(worldMesh); worldMesh.geometry.dispose(); worldMesh.material.dispose(); }
+// ======= Player =======
+const player = {
+  x: (CONFIG.mapW/2) * CONFIG.tileSize + CONFIG.tileSize/2,
+  y: (CONFIG.mapH/2) * CONFIG.tileSize + CONFIG.tileSize/2,
+  radius: CONFIG.tileSize*0.4,
+  angle: 0,
+};
 
-      const positions = [];
-      const normals = [];
-      const colors = [];
-      const indices = [];
-      let vertexCount = 0;
+// ======= Input =======
+const keys = {};
+window.addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; });
+window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
 
-      function pushFace(a,b,c,d, normal, color){
-        positions.push(...a,...b,...c,...d);
-        normals.push(...normal,...normal,...normal,...normal);
-        for(let i=0;i<4;i++){ colors.push(color.r,color.g,color.b); }
-        indices.push(vertexCount, vertexCount+1, vertexCount+2, vertexCount, vertexCount+2, vertexCount+3);
-        vertexCount += 4;
-      }
+let mouse = {x: canvas.width/2, y: canvas.height/2, worldX: player.x, worldY: player.y};
+canvas.addEventListener('mousemove', e => {
+  mouse.x = e.clientX;
+  mouse.y = e.clientY;
+  // world coords will be computed in render loop after camera transform
+});
 
-      for(let x=0;x<WORLD.width;x++){
-        for(let y=0;y<WORLD.height;y++){
-          for(let z=0;z<WORLD.depth;z++){
-            const t = map[idx(x,y,z)];
-            if (!t) continue;
-            const c = new THREE.Color(BLOCKS[t] || 0xffffff);
-            const px = x, py = y, pz = z;
-            const nPos = (nx,ny,nz)=> (nx>=0 && nx<WORLD.width && ny>=0 && ny<WORLD.height && nz>=0 && nz<WORLD.depth) ? map[idx(nx,ny,nz)] : 0;
-            const x0 = px, x1 = px+1, y0 = py, y1 = py+1, z0 = pz, z1 = pz+1;
-            if (!nPos(x,y,z-1)) pushFace([x1,y0,z0],[x0,y0,z0],[x0,y1,z0],[x1,y1,z0],[0,0,-1], c);
-            if (!nPos(x,y,z+1)) pushFace([x0,y0,z1],[x1,y0,z1],[x1,y1,z1],[x0,y1,z1],[0,0,1], c);
-            if (!nPos(x-1,y,z)) pushFace([x0,y0,z1],[x0,y0,z0],[x0,y1,z0],[x0,y1,z1],[-1,0,0], c);
-            if (!nPos(x+1,y,z)) pushFace([x1,y0,z0],[x1,y0,z1],[x1,y1,z1],[x1,y1,z0],[1,0,0], c);
-            if (!nPos(x,y-1,z)) pushFace([x0,y0,z0],[x1,y0,z0],[x1,y0,z1],[x0,y0,z1],[0,-1,0], c);
-            if (!nPos(x,y+1,z)) pushFace([x0,y1,z1],[x1,y1,z1],[x1,y1,z0],[x0,y1,z0],[0,1,0], c);
-          }
-        }
-      }
+canvas.addEventListener('mousedown', e => {
+  const rect = canvas.getBoundingClientRect();
+  const cx = rect.left + canvas.width/2 - (camera.x - player.x);
+  // We'll compute world coords simpler in click handler below
+});
 
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions,3));
-      geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals,3));
-      geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors,3));
-      geometry.setIndex(indices);
-      geometry.computeBoundingSphere();
+// prevent context menu to use right click for placing
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+canvas.addEventListener('mousedown', e => {
+  const world = screenToWorld(e.clientX, e.clientY);
+  const tx = Math.floor(world.x / CONFIG.tileSize);
+  const ty = Math.floor(world.y / CONFIG.tileSize);
+  const pdx = tx - Math.floor(player.x / CONFIG.tileSize);
+  const pdy = ty - Math.floor(player.y / CONFIG.tileSize);
+  const dist = Math.hypot(pdx, pdy);
+  if(dist > CONFIG.breakPlaceRange) return; // out of range
 
-      const material = new THREE.MeshLambertMaterial({ vertexColors: true });
-      worldMesh = new THREE.Mesh(geometry, material);
-      scene.add(worldMesh);
+  if(e.button === 0){ // left: break
+    setTile(tx, ty, 0);
+  } else if(e.button === 2){ // right: place dirt if empty
+    if(getTile(tx, ty) === 0) setTile(tx, ty, 2);
+  }
+});
+
+// ======= Camera =======
+const camera = { x: player.x, y: player.y };
+function updateCamera(){
+  // simple camera that centers on player
+  camera.x = player.x;
+  camera.y = player.y;
+}
+function screenToWorld(sx, sy){
+  // Convert screen coords to world coords given camera centered on screen
+  const worldX = camera.x - canvas.width/2 + sx;
+  const worldY = camera.y - canvas.height/2 + sy;
+  return {x: worldX, y: worldY};
+}
+
+// ======= Movement and collision =======
+function movePlayer(dx, dy, dt){
+  if(dx === 0 && dy === 0) return;
+  const speed = CONFIG.playerSpeed;
+  // normalize
+  const len = Math.hypot(dx, dy) || 1;
+  const vx = dx / len * speed * dt;
+  const vy = dy / len * speed * dt;
+
+  // try move on X, check collision
+  if(!collidesAt(player.x + vx, player.y)) player.x += vx;
+  else {
+    // attempt small slide: reduce movement
+    if(!collidesAt(player.x + Math.sign(vx)*2, player.y)) player.x += Math.sign(vx)*2;
+  }
+
+  // try move on Y
+  if(!collidesAt(player.x, player.y + vy)) player.y += vy;
+  else {
+    if(!collidesAt(player.x, player.y + Math.sign(vy)*2)) player.y += Math.sign(vy)*2;
+  }
+}
+
+function collidesAt(px, py){
+  // check four corners of player's bounding circle (approx with box)
+  const r = player.radius;
+  const corners = [
+    {x: px - r, y: py - r},
+    {x: px + r, y: py - r},
+    {x: px - r, y: py + r},
+    {x: px + r, y: py + r},
+  ];
+  for(const c of corners){
+    const tx = Math.floor(c.x / CONFIG.tileSize);
+    const ty = Math.floor(c.y / CONFIG.tileSize);
+    if(tileSolid(getTile(tx, ty))) return true;
+  }
+  return false;
+}
+
+// ======= Rendering =======
+function worldToScreen(wx, wy){
+  return { x: wx - camera.x + canvas.width/2, y: wy - camera.y + canvas.height/2 };
+}
+
+function drawTile(t, sx, sy, size){
+  // simple color palette
+  if(t === 0){
+    // air: draw background
+    ctx.fillStyle = '#9ec7ff'; // sky-ish
+    ctx.fillRect(sx, sy, size, size);
+    return;
+  }
+  switch(t){
+    case 1: ctx.fillStyle = '#5DB85B'; break; // grass
+    case 2: ctx.fillStyle = '#9B6E4A'; break; // dirt
+    case 3: ctx.fillStyle = '#8B8B8B'; break; // stone
+    case 4: ctx.fillStyle = '#4AA3D6'; break; // water
+    default: ctx.fillStyle = '#000';
+  }
+  ctx.fillRect(sx, sy, size, size);
+  // subtle tile border for readability
+  ctx.strokeStyle = 'rgba(0,0,0,0.05)';
+  ctx.strokeRect(sx, sy, size, size);
+}
+
+function drawPlayer(){
+  // compute on-screen position
+  const p = worldToScreen(player.x, player.y);
+  // triangle pointing toward angle
+  ctx.save();
+  ctx.translate(p.x, p.y);
+  ctx.rotate(player.angle);
+  // body
+  ctx.beginPath();
+  ctx.moveTo(player.radius, 0);
+  ctx.lineTo(-player.radius*0.6, -player.radius*0.7);
+  ctx.lineTo(-player.radius*0.6, player.radius*0.7);
+  ctx.closePath();
+  ctx.fillStyle = '#ffdd99';
+  ctx.fill();
+  // outline
+  ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+  ctx.stroke();
+  ctx.restore();
+}
+
+function render(){
+  ctx.clearRect(0,0,canvas.width, canvas.height);
+
+  const tileSize = CONFIG.tileSize;
+  // compute visible tile range
+  const left = Math.floor((camera.x - canvas.width/2) / tileSize) - CONFIG.viewPadding;
+  const top = Math.floor((camera.y - canvas.height/2) / tileSize) - CONFIG.viewPadding;
+  const right = Math.ceil((camera.x + canvas.width/2) / tileSize) + CONFIG.viewPadding;
+  const bottom = Math.ceil((camera.y + canvas.height/2) / tileSize) + CONFIG.viewPadding;
+
+  for(let ty = top; ty <= bottom; ty++){
+    for(let tx = left; tx <= right; tx++){
+      const t = getTile(tx, ty);
+      const wx = tx * tileSize;
+      const wy = ty * tileSize;
+      const s = worldToScreen(wx, wy);
+      drawTile(t, s.x, s.y, tileSize);
     }
+  }
 
-    rebuildWorldMesh();
+  drawPlayer();
 
-    // Add a crosshair (styled via JS)
-    const cross = document.createElement('div');
-    cross.style.position = 'fixed'; cross.style.left='50%'; cross.style.top='50%'; cross.style.transform='translate(-50%,-50%)';
-    cross.style.width='8px'; cross.style.height='8px'; cross.style.borderRadius='50%'; cross.style.background='rgba(0,0,0,0.6)';
-    document.body.appendChild(cross);
+  // HUD
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.font = '14px monospace';
+  ctx.fillText(`x:${(player.x/tileSize).toFixed(2)} y:${(player.y/tileSize).toFixed(2)} ang:${(player.angle*180/Math.PI).toFixed(0)}°`, 12, 20);
+  ctx.fillText('WASD - move   LMB - break   RMB - place dirt', 12, 40);
+}
 
-    const raycaster = new THREE.Raycaster();
-    let currentType = 1; document.getElementById('type').textContent = currentType;
+// ======= Main Loop =======
+let last = performance.now();
+function loop(now){
+  const dt = Math.min((now - last)/1000, 0.05);
+  last = now;
 
-    for(let i=1;i<=5;i++){ const s=document.createElement('div'); s.textContent=i; s.style.width='46px'; s.style.height='46px'; s.style.borderRadius='6px'; s.style.display='flex'; s.style.alignItems='center'; s.style.justifyContent='center'; s.style.background='rgba(255,255,255,0.9)'; s.style.fontWeight='600'; hotbar.appendChild(s); }
+  // input -> velocity
+  let dx = 0, dy = 0;
+  if(keys['w']) dy -= 1;
+  if(keys['s']) dy += 1;
+  if(keys['a']) dx -= 1;
+  if(keys['d']) dx += 1;
+  movePlayer(dx, dy, dt);
 
-    const keys = {};
-    document.addEventListener('keydown', (e)=>{ keys[e.code]=true; if (e.code==='Space') e.preventDefault(); });
-    document.addEventListener('keyup', (e)=>{ keys[e.code]=false; });
-    window.addEventListener('wheel', (e)=>{ if (e.deltaY>0) currentType = Math.min(currentType+1, BLOCKS.length-1); else currentType = Math.max(1,currentType-1); document.getElementById('type').textContent = currentType; });
+  updateCamera();
 
-    window.addEventListener('contextmenu', (e)=>e.preventDefault());
-    window.addEventListener('mousedown', (e)=>{ if (!controls.isLocked) return; if (e.button===0) interactBlock('remove'); if (e.button===2) interactBlock('place'); });
+  // update mouse world position and player angle
+  const worldMouse = screenToWorld(mouse.x, mouse.y);
+  mouse.worldX = worldMouse.x;
+  mouse.worldY = worldMouse.y;
+  player.angle = Math.atan2(mouse.worldY - player.y, mouse.worldX - player.x);
 
-    function interactBlock(mode){
-      raycaster.setFromCamera({x:0,y:0}, camera);
-      const intersects = raycaster.intersectObject(worldMesh, true);
-      if (!intersects.length) return;
-      const it = intersects[0];
-      const point = it.point;
-      const normal = it.face.normal;
-      const bx = Math.floor(point.x + (normal.x>0 ? 0.5 : -0.5));
-      const by = Math.floor(point.y + (normal.y>0 ? 0.5 : -0.5));
-      const bz = Math.floor(point.z + (normal.z>0 ? 0.5 : -0.5));
+  render();
+  requestAnimationFrame(loop);
+}
 
-      if (mode==='remove'){
-        if (within(bx,by,bz)){ map[idx(bx,by,bz)] = 0; rebuildWorldMesh(); }
-      } else {
-        const px = bx + (normal.x>0 ? 1 : (normal.x<0 ? -1:0));
-        const py = by + (normal.y>0 ? 1 : (normal.y<0 ? -1:0));
-        const pz = bz + (normal.z>0 ? 1 : (normal.z<0 ? -1:0));
-        if (within(px,py,pz)){ map[idx(px,py,pz)] = currentType; rebuildWorldMesh(); }
-      }
-    }
+// ======= Init =======
+generateWorld();
+requestAnimationFrame(loop);
 
-    function within(x,y,z){ return x>=0 && x<WORLD.width && y>=0 && y<WORLD.height && z>=0 && z<WORLD.depth; }
+// small helper: center canvas initial mouse
+canvas.addEventListener('mouseenter', e => {
+  mouse.x = e.clientX; mouse.y = e.clientY;
+});
 
-    function collidesAt(pos){
-      const footY = pos.y - 0.1;
-      const feetY = Math.floor(footY);
-      for(let y=feetY; y<=Math.floor(pos.y + player.height); y++){
-        const x0 = Math.floor(pos.x - 0.25);
-        const x1 = Math.floor(pos.x + 0.25);
-        const z0 = Math.floor(pos.z - 0.25);
-        const z1 = Math.floor(pos.z + 0.25);
-        for(let x=x0;x<=x1;x++) for(let z=z0;z<=z1;z++){ if (!within(x,y,z)) continue; if (map[idx(x,y,z)]) return true; }
-      }
-      return false;
-    }
+// make pointer visible and let right-click be used
+canvas.style.cursor = 'crosshair';
 
-    controls.getObject().position.copy(player.position);
-    camera.position.set(0,0,0);
-
-    const clock = new THREE.Clock();
-    function animate(){
-      const dt = Math.min(0.05, clock.getDelta());
-      const forward = (keys['KeyW']?1:0) - (keys['KeyS']?1:0);
-      const strafe = (keys['KeyD']?1:0) - (keys['KeyA']?1:0);
-      player.direction.set(0,0,0);
-      if (forward) player.direction.z = forward;
-      if (strafe) player.direction.x = strafe;
-      if (player.direction.lengthSq()>0) player.direction.normalize();
-      const euler = new THREE.Euler(0, controls.getObject().rotation.y, 0, 'YXZ');
-      const move = player.direction.clone().applyEuler(euler).multiplyScalar(player.speed * dt);
-      player.velocity.y -= 9.8 * dt;
-      const prevPos = controls.getObject().position.clone();
-      controls.getObject().position.add(move);
-      controls.getObject().position.y += player.velocity.y * dt;
-      if (collidesAt(controls.getObject().position)){
-        controls.getObject().position.copy(prevPos);
-        player.velocity.y = 0;
-        player.onGround = true;
-      } else { player.onGround = false; }
-      if (keys['Space'] && player.onGround){ player.velocity.y = player.jumpSpeed; player.onGround=false; }
-      renderer.render(scene, camera);
-      requestAnimationFrame(animate);
-    }
-
-    animate();
-
-    // Note: run via local http server to avoid module import issues with file://
-
-  </script>
+// expose some utilities to console for debugging
+window.MinecraftLite = { CONFIG, player, getTile, setTile, map };
+</script>
 </body>
 </html>
