@@ -3,157 +3,127 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>2D Top-Down — Distinct Biomes, Barrier, Trees & Rocks</title>
+  <title>2D Top-Down — Fullscreen, Biomes, Trees (2x2), Rocks with offsets</title>
   <style>
-    html,body{height:100%;margin:0;background:#0b1220;color:#ddd;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
-    .wrap{display:flex;align-items:center;justify-content:center;height:100%;}
-    canvas{background:#7ec850;box-shadow:0 8px 30px rgba(0,0,0,.5);border-radius:6px}
+    html,body{height:100%;margin:0;background:#0b1220;color:#ddd;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;overflow:hidden}
+    canvas{display:block}
     .hud{position:fixed;left:12px;top:12px;color:#fff;background:rgba(0,0,0,.25);padding:8px;border-radius:6px;font-size:13px}
     .hint{opacity:.9}
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <canvas id="game"></canvas>
-  </div>
+  <canvas id="game"></canvas>
   <div class="hud">
     <div><strong>Controls</strong></div>
-    <div class="hint">WASD / Arrow keys — move</div>
-    <div class="hint">Mouse — aim (player rotates to cursor)</div>
-    <div class="hint">Scroll — zoom</div>
+    <div class="hint">WASD / Arrows — move</div>
+    <div class="hint">Mouse — aim</div>
+    <div class="hint">Scroll — zoom (Ctrl+Scroll disabled for browser zoom)</div>
   </div>
 
 <script>
-// Features added per request:
-// - Barrier ring at map edges (impassable)
-// - Biomes are larger, more distinct (less mixing) using a sharp biome mask
-// - Rocks (small, passable decorations)
-// - Trees (impassable, placed as objects)
-// - Performance-friendly: culling, atlas, object lists
+// Fullscreen-friendly 2D top-down with distinct biomes, water border, rocks with offsets, and trees occupying 2x2 tiles.
+// - Canvas scales with device pixel ratio and window size
+// - Ctrl+scroll browser zoom prevented (wheel with ctrl is canceled)
+// - Trees occupy 2x2 tiles and block movement; rocks are passable and have random offsets within their tile
+// - Water around edges acts as impassable wall (world end barrier)
+// - Grass tiles have several shade variants that mix naturally
 
 // -----------------------------------------------------------------------------
-// Config
 const TILE = 32;
-const MAP_W = 140;
-const MAP_H = 100;
-const CANVAS_BASE_W = 1280;
-const CANVAS_BASE_H = 720;
+const MAP_W = 160;
+const MAP_H = 110;
+const DPR = window.devicePixelRatio || 1;
 
-const TILE_GRASS = 0;
-const TILE_DIRT  = 1;
-const TILE_WATER = 2;
-const TILE_BARRIER = 3; // explicit barrier tile drawn as dark rock
+// Tile constants: we'll reserve 4 grass variants (0..3), dirt, water
+const TILE_GRASS_BASE = 0; // grass variant indexes 0..3
+const GRASS_VARIANTS = 4;
+const TILE_DIRT = GRASS_VARIANTS;    // 4
+const TILE_WATER = GRASS_VARIANTS+1; // 5
 
-// Object types
-const OBJ_NONE = 0;
-const OBJ_ROCK = 1;   // passable
-const OBJ_TREE = 2;   // impassable
+const OBJ_NONE = 0; const OBJ_ROCK = 1; const OBJ_TREE = 2;
 
 // -----------------------------------------------------------------------------
-// Fast seeded RNG
-function makeSeededRandom(seed){
-  let s = seed >>> 0;
-  return function(){ s = (s + 0x6D2B79F5) | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = (t + Math.imul(t ^ t >>> 7, 61 | t)) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }
-}
+function makeSeededRandom(seed){ let s = seed>>>0; return function(){ s = (s + 0x6D2B79F5) | 0; let t = Math.imul(s ^ s>>>15, 1 | s); t = (t + Math.imul(t ^ t>>>7, 61 | t)) ^ t; return ((t ^ t>>>14) >>> 0) / 4294967296; } }
 function smoothstep(a){ return a*a*(3-2*a); }
-
-// Lightweight value noise
-function valueNoise2D(x, y, seed){
-  const xf = Math.floor(x), yf = Math.floor(y);
-  const rx = x - xf, ry = y - yf;
-  const u = smoothstep(rx), v = smoothstep(ry);
-  const rnd00 = makeSeededRandom(((xf*73856093) ^ (yf*19349663) ^ seed) >>> 0)();
-  const rnd10 = makeSeededRandom((((xf+1)*73856093) ^ (yf*19349663) ^ seed) >>> 0)();
-  const rnd01 = makeSeededRandom(((xf*73856093) ^ ((yf+1)*19349663) ^ seed) >>> 0)();
-  const rnd11 = makeSeededRandom((((xf+1)*73856093) ^ ((yf+1)*19349663) ^ seed) >>> 0)();
-  const xa = rnd00*(1-u) + rnd10*u;
-  const xb = rnd01*(1-u) + rnd11*u;
-  return xa*(1-v) + xb*v;
-}
+function valueNoise2D(x,y,seed){ const xf=Math.floor(x), yf=Math.floor(y); const rx=x-xf, ry=y-yf; const u=smoothstep(rx), v=smoothstep(ry); const r00 = makeSeededRandom(((xf*73856093) ^ (yf*19349663) ^ seed)>>>0)(); const r10 = makeSeededRandom((((xf+1)*73856093) ^ (yf*19349663) ^ seed)>>>0)(); const r01 = makeSeededRandom(((xf*73856093) ^ ((yf+1)*19349663) ^ seed)>>>0)(); const r11 = makeSeededRandom((((xf+1)*73856093) ^ ((yf+1)*19349663) ^ seed)>>>0)(); const xa = r00*(1-u) + r10*u; const xb = r01*(1-u) + r11*u; return xa*(1-v) + xb*v; }
 function octaveNoise(x,y,seed,oct=4,scale=1){ let amp=1,freq=1,sum=0,tot=0; for(let i=0;i<oct;i++){ sum += valueNoise2D(x*freq/scale, y*freq/scale, seed + i*1000) * amp; tot += amp; amp *= 0.5; freq *= 2; } return sum/tot; }
 
 // -----------------------------------------------------------------------------
-// Canvas
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
-resizeCanvas(); window.addEventListener('resize', resizeCanvas);
+let canvasW = 0, canvasH = 0;
+function resizeCanvas(){ canvasW = Math.max(320, window.innerWidth); canvasH = Math.max(240, window.innerHeight); canvas.style.width = canvasW + 'px'; canvas.style.height = canvasH + 'px'; canvas.width = Math.floor(canvasW * DPR); canvas.height = Math.floor(canvasH * DPR); ctx.setTransform(DPR,0,0,DPR,0,0); }
+window.addEventListener('resize', resizeCanvas); resizeCanvas();
+
+// Prevent browser zoom via Ctrl + scroll
+window.addEventListener('wheel', function(e){ if(e.ctrlKey){ e.preventDefault(); } }, {passive:false});
+window.addEventListener('gesturestart', e=>{ e.preventDefault(); }, {passive:false});
 
 // -----------------------------------------------------------------------------
-// Tile atlas (includes visuals for tiles and a simple tree/rock drawn later)
-function createTileAtlas(){
-  const off = document.createElement('canvas'); off.width = TILE*4; off.height = TILE; const oc = off.getContext('2d');
-  // GRASS
-  const g = oc.createLinearGradient(0,0,TILE,TILE); g.addColorStop(0,'#78bf4a'); g.addColorStop(1,'#4fa03a'); oc.fillStyle = g; oc.fillRect(0,0,TILE,TILE);
-  for(let i=0;i<50;i++){ oc.fillStyle = `rgba(0,0,0,${Math.random()*0.04})`; oc.fillRect(Math.random()*TILE, Math.random()*TILE, 1, 1); }
-  // DIRT
-  const dx = TILE; const dg = oc.createLinearGradient(dx,0,dx+TILE,TILE); dg.addColorStop(0,'#9f6b3a'); dg.addColorStop(1,'#7a4b2a'); oc.fillStyle = dg; oc.fillRect(dx,0,TILE,TILE);
-  for(let i=0;i<40;i++){ oc.fillStyle = `rgba(0,0,0,${Math.random()*0.05})`; oc.fillRect(dx+Math.random()*TILE, Math.random()*TILE, 1, 1); }
-  // WATER
-  const wx = TILE*2; const wg = oc.createLinearGradient(wx,0,wx+TILE,TILE); wg.addColorStop(0,'#3aa9df'); wg.addColorStop(1,'#1f6fa8'); oc.fillStyle = wg; oc.fillRect(wx,0,TILE,TILE);
-  oc.globalAlpha = 0.08; for(let i=0;i<3;i++){ oc.fillRect(wx + i*6 + 2, 6 + i*3, TILE-8, 2); } oc.globalAlpha = 1;
-  // BARRIER (dark rock)
-  const bx = TILE*3; const bg = oc.createLinearGradient(bx,0,bx+TILE,TILE); bg.addColorStop(0,'#4a4a4a'); bg.addColorStop(1,'#2c2c2c'); oc.fillStyle = bg; oc.fillRect(bx,0,TILE,TILE);
-  oc.strokeStyle = 'rgba(0,0,0,0.2)'; oc.strokeRect(bx+1,1,TILE-2,TILE-2);
-  return off;
-}
-
-// -----------------------------------------------------------------------------
-// World with distinct biomes + object placement
+// World data structures
 class World {
-  constructor(w,h){ this.w=w; this.h=h; this.tiles = new Uint8Array(w*h); this.objects = new Uint8Array(w*h); this.seed = Math.floor(Math.random()*1e9); this.generate(); }
+  constructor(w,h){ this.w=w; this.h=h; this.tiles = new Uint8Array(w*h); this.objects = new Uint8Array(w*h); this.grassVariant = new Uint8Array(w*h); this.rockOffsetX = new Float32Array(w*h); this.rockOffsetY = new Float32Array(w*h); this.treeAnchor = new Uint8Array(w*h); this.seed = Math.floor(Math.random()*1e9); this.generate(); }
   idx(x,y){ return y*this.w + x; }
   inBounds(x,y){ return x>=0 && y>=0 && x<this.w && y<this.h; }
-  getTile(x,y){ if(!this.inBounds(x,y)) return TILE_BARRIER; return this.tiles[this.idx(x,y)]; }
+  getTile(x,y){ if(!this.inBounds(x,y)) return TILE_WATER; return this.tiles[this.idx(x,y)]; }
   getObject(x,y){ if(!this.inBounds(x,y)) return OBJ_NONE; return this.objects[this.idx(x,y)]; }
   setTile(x,y,v){ if(!this.inBounds(x,y)) return; this.tiles[this.idx(x,y)] = v; }
   setObject(x,y,v){ if(!this.inBounds(x,y)) return; this.objects[this.idx(x,y)] = v; }
 
-  generate(){
-    const biomeScale = 70; // bigger -> very distinct biomes
-    const seed = this.seed;
-    // First create a biome mask (0..1)
-    const biomeMask = new Float32Array(this.w*this.h);
-    for(let y=0;y<this.h;y++){
-      for(let x=0;x<this.w;x++){
-        const b = octaveNoise(x, y, seed, 5, biomeScale); // smooth large-scale
-        biomeMask[this.idx(x,y)] = b;
-      }
-    }
+  generate(){ const seed = this.seed; const biomeScale = 90; const localScale = 8;
+    // biome mask
+    const biome = new Float32Array(this.w*this.h);
+    for(let y=0;y<this.h;y++) for(let x=0;x<this.w;x++) biome[this.idx(x,y)] = octaveNoise(x,y,seed,5,biomeScale);
 
-    // Assign tiles from biome mask with thresholds — this makes large contiguous biomes
+    const rnd = makeSeededRandom(seed+42);
     for(let y=0;y<this.h;y++){
       for(let x=0;x<this.w;x++){
-        // Barrier at edges: 2-tile thick ring
-        if(x<2 || y<2 || x>this.w-3 || y>this.h-3){ this.setTile(x,y, TILE_BARRIER); continue; }
-        const b = biomeMask[this.idx(x,y)];
-        // Decide biome by b value: <0.33 = water-world (more water), 0.33-0.66 = grassland, >0.66 = dry/dirt
-        if(b < 0.33){ // watery biome — mostly water, with islands
-          const local = octaveNoise(x,y,seed+2000,3,8);
-          this.setTile(x,y, (local < 0.45) ? TILE_WATER : TILE_GRASS);
-        } else if(b < 0.66){ // grass biome
-          const local = octaveNoise(x,y,seed+3000,3,10);
-          this.setTile(x,y, (local < 0.3) ? TILE_GRASS : TILE_GRASS);
-        } else { // dry/dirt biome
-          const local = octaveNoise(x,y,seed+4000,3,8);
-          this.setTile(x,y, (local < 0.6) ? TILE_DIRT : TILE_DIRT);
+        const i = this.idx(x,y);
+        const b = biome[i];
+        // edge water barrier: 2 tiles ring
+        if(x<2 || y<2 || x>this.w-3 || y>this.h-3){ this.tiles[i] = TILE_WATER; continue; }
+        // biome selection
+        if(b < 0.35){ // watery biome
+          const local = octaveNoise(x,y,seed+2000,3,localScale);
+          this.tiles[i] = (local < 0.5) ? TILE_WATER : TILE_GRASS_BASE + Math.floor(octaveNoise(x,y,seed+7000,2,4)*GRASS_VARIANTS);
+        } else if(b < 0.67){ // grassland
+          this.tiles[i] = TILE_GRASS_BASE + Math.floor(octaveNoise(x,y,seed+3000,3,6)*GRASS_VARIANTS);
+        } else { // dry/dirt
+          const local = octaveNoise(x,y,seed+4000,3,6);
+          this.tiles[i] = (local < 0.6) ? TILE_DIRT : TILE_GRASS_BASE + Math.floor(octaveNoise(x,y,seed+8000,2,4)*GRASS_VARIANTS);
         }
+        // store grass variant for mixing (if grass)
+        if(this.tiles[i] >= TILE_GRASS_BASE && this.tiles[i] < TILE_GRASS_BASE+GRASS_VARIANTS){ this.grassVariant[i] = this.tiles[i] - TILE_GRASS_BASE; }
       }
     }
 
-    // Place objects: trees in grass biomes, rocks scattered across all but water and barrier
-    const rnd = makeSeededRandom(seed+9999);
-    for(let y=2;y<this.h-2;y++){
-      for(let x=2;x<this.w-2;x++){
-        const t = this.getTile(x,y);
-        if(t === TILE_WATER || t === TILE_BARRIER) continue;
-        // tree density depends on biome: grass biomes higher chance
-        const biomeVal = biomeMask[this.idx(x,y)];
+    // Place trees and rocks
+    const placeRnd = makeSeededRandom(seed+9999);
+    for(let y=2; y<this.h-2; y++){
+      for(let x=2; x<this.w-2; x++){
+        const i = this.idx(x,y);
+        const t = this.tiles[i];
+        if(t === TILE_WATER) continue;
+        // trees prefer grass biomes (biome value between ranges)
+        const b = biome[i];
         let treeChance = 0.01;
-        if(biomeVal >= 0.33 && biomeVal < 0.66) treeChance = 0.06; // foresty
-        if(biomeVal >= 0.66) treeChance = 0.015; // sparse
-        if(rnd() < treeChance){ this.setObject(x,y,OBJ_TREE); continue; }
-        // rocks — small, passable decorations
-        if(rnd() < 0.02){ this.setObject(x,y,OBJ_ROCK); }
+        if(b >= 0.33 && b < 0.67) treeChance = 0.06;
+        if(b >= 0.67) treeChance = 0.02;
+        // try placing a 2x2 tree anchored at top-left only (avoid overflow)
+        if(x < this.w-2 && y < this.h-2 && placeRnd() < treeChance){
+          // ensure 2x2 area is free of water and objects
+          let ok = true;
+          for(let yy=y; yy<y+2; yy++) for(let xx=x; xx<x+2; xx++){ const idx2 = this.idx(xx,yy); if(this.tiles[idx2] === TILE_WATER) ok = false; if(this.objects[idx2] !== OBJ_NONE) ok = false; }
+          if(ok){
+            // mark 2x2 as tree
+            for(let yy=y; yy<y+2; yy++) for(let xx=x; xx<x+2; xx++){ this.objects[this.idx(xx,yy)] = OBJ_TREE; }
+            this.treeAnchor[i] = 1; // mark top-left as anchor for drawing
+            continue;
+          }
+        }
+        // rocks: random placement, not centered
+        if(placeRnd() < 0.025){ this.objects[i] = OBJ_ROCK; // offsets within +- (tile/2 - margin)
+          const maxOff = TILE*0.32; this.rockOffsetX[i] = (placeRnd()*2-1)*maxOff; this.rockOffsetY[i] = (placeRnd()*2-1)*maxOff; }
       }
     }
   }
@@ -164,93 +134,81 @@ class World {
     const top = Math.max(0, Math.floor((camera.y - (canvas.height/2)/camera.scale)/TILE) -1);
     const bottom = Math.min(this.h-1, Math.ceil((camera.y + (canvas.height/2)/camera.scale)/TILE) +1);
 
-    // draw tiles using atlas
     for(let yy=top; yy<=bottom; yy++){
-      const py = yy * TILE;
       for(let xx=left; xx<=right; xx++){
-        const t = this.getTile(xx,yy);
-        ctx.drawImage(atlas, t*TILE, 0, TILE, TILE, xx*TILE, py, TILE, TILE);
+        const i = this.idx(xx,yy);
+        const tile = this.tiles[i];
+        // if grass variant, draw specific atlas column
+        if(tile >= TILE_GRASS_BASE && tile < TILE_GRASS_BASE+GRASS_VARIANTS){
+          const varIdx = this.grassVariant[i];
+          ctx.drawImage(atlas, varIdx*TILE, 0, TILE, TILE, xx*TILE, yy*TILE, TILE, TILE);
+        } else if(tile === TILE_DIRT){ ctx.drawImage(atlas, GRASS_VARIANTS*TILE, 0, TILE, TILE, xx*TILE, yy*TILE, TILE, TILE); }
+        else { ctx.drawImage(atlas, (GRASS_VARIANTS+1)*TILE, 0, TILE, TILE, xx*TILE, yy*TILE, TILE, TILE); }
       }
     }
 
-    // draw objects (trees/rocks) — trees drawn over tiles and block movement
+    // draw rocks and tree anchors
     for(let yy=top; yy<=bottom; yy++){
-      const py = yy * TILE;
       for(let xx=left; xx<=right; xx++){
-        const o = this.getObject(xx,yy);
-        if(o === OBJ_ROCK){ drawRock(ctx, xx*TILE + TILE/2, py + TILE/2); }
-        else if(o === OBJ_TREE){ drawTree(ctx, xx*TILE + TILE/2, py + TILE/2); }
+        const i = this.idx(xx,yy);
+        const o = this.objects[i];
+        if(o === OBJ_ROCK){ const cx = xx*TILE + TILE/2 + this.rockOffsetX[i]; const cy = yy*TILE + TILE/2 + this.rockOffsetY[i]; drawRock(ctx, cx, cy); }
+        else if(o === OBJ_TREE && this.treeAnchor[i]){ // draw larger tree for 2x2 anchor
+          const cx = xx*TILE + TILE; const cy = yy*TILE + TILE; drawTreeLarge(ctx, cx, cy); }
       }
     }
   }
 }
 
 // -----------------------------------------------------------------------------
-// Simple rock + tree drawing (cheap) — rocks are passable, trees are impassable silhouettes
-function drawRock(ctx, cx, cy){ ctx.save(); ctx.translate(cx, cy); ctx.rotate((cx+cy)%7 * 0.002); ctx.beginPath(); ctx.ellipse(0,0,6,5,0,0,Math.PI*2); ctx.fillStyle='#6b665b'; ctx.fill(); ctx.strokeStyle='rgba(0,0,0,0.25)'; ctx.stroke(); ctx.restore(); }
-function drawTree(ctx, cx, cy){ ctx.save(); ctx.translate(cx, cy); // trunk
-  ctx.fillStyle='#6a4b2a'; ctx.fillRect(-3,4,6,8);
-  // canopy — three layered circles
-  ctx.beginPath(); ctx.ellipse(0,0,12,9,0,0,Math.PI*2); ctx.fillStyle='#147a2c'; ctx.fill();
-  ctx.beginPath(); ctx.ellipse(-4,-6,9,7,0,0,Math.PI*2); ctx.fillStyle='#1aa13a'; ctx.fill();
-  ctx.beginPath(); ctx.ellipse(6,-4,7,5,0,0,Math.PI*2); ctx.fillStyle='#0f6b24'; ctx.fill();
+function drawRock(ctx, cx, cy){ ctx.save(); ctx.translate(cx, cy); ctx.beginPath(); ctx.ellipse(0,0,6,5,0,0,Math.PI*2); ctx.fillStyle='#6b665b'; ctx.fill(); ctx.strokeStyle='rgba(0,0,0,0.25)'; ctx.stroke(); ctx.restore(); }
+function drawTreeLarge(ctx, cx, cy){ ctx.save(); ctx.translate(cx, cy); // trunk spanning lower center
+  ctx.fillStyle='#6a4b2a'; ctx.fillRect(-6,6,12,12);
+  // canopy bigger for 2x2
+  ctx.beginPath(); ctx.ellipse(0,-4,26,20,0,0,Math.PI*2); ctx.fillStyle='#147a2c'; ctx.fill();
+  ctx.beginPath(); ctx.ellipse(-8,-14,18,14,0,0,Math.PI*2); ctx.fillStyle='#1aa13a'; ctx.fill();
+  ctx.beginPath(); ctx.ellipse(12,-12,14,10,0,0,Math.PI*2); ctx.fillStyle='#0f6b24'; ctx.fill();
   ctx.restore(); }
 
 // -----------------------------------------------------------------------------
-// Input
-class Input { constructor(canvas){ this.keys={}; this.mouse={x:0,y:0, worldX:0, worldY:0};
-    canvas.addEventListener('mousemove', e=>{ const r=canvas.getBoundingClientRect(); this.mouse.x = e.clientX-r.left; this.mouse.y = e.clientY-r.top; });
-    canvas.addEventListener('wheel', e=>{ e.preventDefault(); camera.targetScale = clamp(camera.targetScale * (1 - e.deltaY * 0.0012), 0.6, 1.4); }, {passive:false});
-    window.addEventListener('keydown', e=>{ this.keys[e.key.toLowerCase()] = true; }); window.addEventListener('keyup', e=>{ this.keys[e.key.toLowerCase()] = false; }); }
-  isDown(k){ return !!this.keys[k.toLowerCase()]; }
-}
+function createTileAtlas(){ const off = document.createElement('canvas'); off.width = (GRASS_VARIANTS + 2)*TILE; off.height = TILE; const oc = off.getContext('2d');
+  // multiple grass variants
+  const grassColors = [['#7cc85b','#4fa043'], ['#6fb23a','#4b8d2e'], ['#8bdc66','#52a544'], ['#5fb03a','#3f7b2a']];
+  for(let v=0; v<GRASS_VARIANTS; v++){ const gx = v*TILE; const g = oc.createLinearGradient(gx,0,gx+TILE,TILE); g.addColorStop(0, grassColors[v][0]); g.addColorStop(1, grassColors[v][1]); oc.fillStyle = g; oc.fillRect(gx,0,TILE,TILE); for(let i=0;i<40;i++){ oc.fillStyle = `rgba(0,0,0,${Math.random()*0.04})`; oc.fillRect(gx + Math.random()*TILE, Math.random()*TILE, 1, 1); } }
+  // dirt
+  const dx = GRASS_VARIANTS*TILE; const dg = oc.createLinearGradient(dx,0,dx+TILE,TILE); dg.addColorStop(0,'#9f6b3a'); dg.addColorStop(1,'#7a4b2a'); oc.fillStyle = dg; oc.fillRect(dx,0,TILE,TILE); for(let i=0;i<30;i++){ oc.fillStyle = `rgba(0,0,0,${Math.random()*0.05})`; oc.fillRect(dx + Math.random()*TILE, Math.random()*TILE, 1, 1); }
+  // water (barrier look)
+  const wx = (GRASS_VARIANTS+1)*TILE; const wg = oc.createLinearGradient(wx,0,wx+TILE,TILE); wg.addColorStop(0,'#3aa9df'); wg.addColorStop(1,'#1f6fa8'); oc.fillStyle = wg; oc.fillRect(wx,0,TILE,TILE); oc.globalAlpha = 0.08; for(let i=0;i<3;i++){ oc.fillRect(wx + i*6 + 2, 6 + i*3, TILE-8, 2); } oc.globalAlpha = 1; return off; }
 
 // -----------------------------------------------------------------------------
-// Camera
-class Camera { constructor(x=0,y=0,scale=0.9){ this.x=x; this.y=y; this.scale=scale; this.targetScale=scale; this.smooth=0.14; this.zoomSmooth=0.14; }
-  update(dt, tx, ty){ this.x = lerp(this.x, tx, this.smooth); this.y = lerp(this.y, ty, this.smooth); this.scale = lerp(this.scale, this.targetScale, this.zoomSmooth); }
-  screenToWorld(sx,sy,canvas){ const wx = (sx - canvas.width/2)/this.scale + this.x; const wy = (sy - canvas.height/2)/this.scale + this.y; return {x:wx,y:wy}; }
-}
+class Input{ constructor(canvas){ this.keys={}; this.mouse={x:0,y:0,worldX:0,worldY:0}; canvas.addEventListener('mousemove', e=>{ const r = canvas.getBoundingClientRect(); this.mouse.x = e.clientX - r.left; this.mouse.y = e.clientY - r.top; }); canvas.addEventListener('wheel', e=>{ e.preventDefault(); if(!e.ctrlKey) camera.targetScale = clamp(camera.targetScale * (1 - e.deltaY * 0.0012), 0.6, 1.4); }, {passive:false}); window.addEventListener('keydown', e=>{ this.keys[e.key.toLowerCase()] = true; }); window.addEventListener('keyup', e=>{ this.keys[e.key.toLowerCase()] = false; }); } isDown(k){ return !!this.keys[k.toLowerCase()]; } }
 
-// -----------------------------------------------------------------------------
-// Player (collision checks include water, barrier tiles and trees)
-class Player { constructor(x,y){ this.x=x; this.y=y; this.radius=12; this.speed=165; this.angle=0; }
-  update(dt,input,world,camera,canvas){ let vx=0,vy=0; if(input.isDown('w')||input.isDown('arrowup')) vy-=1; if(input.isDown('s')||input.isDown('arrowdown')) vy+=1; if(input.isDown('a')||input.isDown('arrowleft')) vx-=1; if(input.isDown('d')||input.isDown('arrowright')) vx+=1; const mag = Math.hypot(vx,vy); if(mag>0){ vx/=mag; vy/=mag; }
-    const nx = this.x + vx*this.speed*dt; const ny = this.y + vy*this.speed*dt;
-    const collides = (px,py) => { const tx = Math.floor(px/TILE); const ty = Math.floor(py/TILE); const tile = world.getTile(tx,ty); if(tile === TILE_WATER || tile === TILE_BARRIER) return true; const obj = world.getObject(tx,ty); if(obj === OBJ_TREE) return true; return false; };
-    if(!collides(nx, this.y)) this.x = nx; if(!collides(this.x, ny)) this.y = ny;
-    const mw = camera.screenToWorld(input.mouse.x, input.mouse.y, canvas); this.angle = Math.atan2(mw.y - this.y, mw.x - this.x);
-  }
-  draw(ctx){ ctx.save(); ctx.translate(this.x,this.y); ctx.rotate(this.angle); ctx.beginPath(); ctx.moveTo(14,0); ctx.lineTo(-10,-8); ctx.lineTo(-6,0); ctx.lineTo(-10,8); ctx.closePath(); ctx.fillStyle = '#2b8cff'; ctx.fill(); ctx.beginPath(); ctx.arc(4,-2,2,0,Math.PI*2); ctx.fillStyle='#fff'; ctx.fill(); ctx.restore(); }
-}
+class Camera{ constructor(x=0,y=0,scale=0.95){ this.x=x; this.y=y; this.scale=scale; this.targetScale=scale; this.smooth=0.12; this.zoomSmooth=0.12; } update(dt,tx,ty){ this.x = lerp(this.x, tx, this.smooth); this.y = lerp(this.y, ty, this.smooth); this.scale = lerp(this.scale, this.targetScale, this.zoomSmooth); } screenToWorld(sx,sy,canvas){ const wx = (sx - canvas.width/(2*DPR))/this.scale + this.x; const wy = (sy - canvas.height/(2*DPR))/this.scale + this.y; return {x:wx,y:wy}; } }
 
-// -----------------------------------------------------------------------------
-// Utils
+class Player{ constructor(x,y){ this.x=x; this.y=y; this.radius=12; this.speed=170; this.angle=0; } update(dt,input,world,camera,canvas){ let vx=0,vy=0; if(input.isDown('w')||input.isDown('arrowup')) vy-=1; if(input.isDown('s')||input.isDown('arrowdown')) vy+=1; if(input.isDown('a')||input.isDown('arrowleft')) vx-=1; if(input.isDown('d')||input.isDown('arrowright')) vx+=1; const mag=Math.hypot(vx,vy); if(mag>0){ vx/=mag; vy/=mag; } const nx = this.x + vx*this.speed*dt; const ny = this.y + vy*this.speed*dt; const collides = (px,py)=>{ const tx = Math.floor(px/TILE); const ty = Math.floor(py/TILE); const tile = world.getTile(tx,ty); if(tile === TILE_WATER) return true; // water barrier
+      // if any object at tile is tree -> blocked
+      if(world.getObject(tx,ty) === OBJ_TREE) return true; return false; };
+    if(!collides(nx, this.y)) this.x = nx; if(!collides(this.x, ny)) this.y = ny; const mw = camera.screenToWorld(input.mouse.x, input.mouse.y, canvas); this.angle = Math.atan2(mw.y - this.y, mw.x - this.x); }
+  draw(ctx){ ctx.save(); ctx.translate(this.x,this.y); ctx.rotate(this.angle); ctx.beginPath(); ctx.moveTo(14,0); ctx.lineTo(-10,-8); ctx.lineTo(-6,0); ctx.lineTo(-10,8); ctx.closePath(); ctx.fillStyle='#2b8cff'; ctx.fill(); ctx.beginPath(); ctx.arc(4,-2,2,0,Math.PI*2); ctx.fillStyle='#fff'; ctx.fill(); ctx.restore(); } }
+
 function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); } function lerp(a,b,t){ return a + (b-a)*t; }
 
 // -----------------------------------------------------------------------------
-// Setup world, atlas, player, camera
-const world = new World(MAP_W, MAP_H);
-const atlas = createTileAtlas();
-const player = new Player(MAP_W*TILE/2, MAP_H*TILE/2);
-const camera = new Camera(player.x, player.y, 0.9);
-const input = new Input(canvas);
+const world = new World(MAP_W, MAP_H); const atlas = createTileAtlas(); const player = new Player(MAP_W*TILE/2, MAP_H*TILE/2); const camera = new Camera(player.x, player.y, 0.95); const input = new Input(canvas);
 
-let last = performance.now(); function gameLoop(now){ const dt = Math.min((now-last)/1000, 1/15); last = now; player.update(dt,input,world,camera,canvas); camera.update(dt,player.x,player.y); const mw = camera.screenToWorld(input.mouse.x, input.mouse.y, canvas); input.mouse.worldX = mw.x; input.mouse.worldY = mw.y; render(); requestAnimationFrame(gameLoop); }
-requestAnimationFrame(gameLoop);
+let last = performance.now(); function gameLoop(now){ const dt = Math.min((now-last)/1000, 1/15); last = now; player.update(dt,input,world,camera,canvas); camera.update(dt,player.x,player.y); const mw = camera.screenToWorld(input.mouse.x, input.mouse.y, canvas); input.mouse.worldX = mw.x; input.mouse.worldY = mw.y; render(); requestAnimationFrame(gameLoop); } requestAnimationFrame(gameLoop);
 
-// -----------------------------------------------------------------------------
-// Render
-function render(){ ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,canvas.width,canvas.height); ctx.setTransform(camera.scale,0,0,camera.scale, canvas.width/2 - camera.x*camera.scale, canvas.height/2 - camera.y*camera.scale); world.draw(ctx,camera,canvas,atlas); player.draw(ctx);
-  // cursor marker
+function render(){ // clear using DPR-aware sizes
+  ctx.setTransform(DPR,0,0,DPR,0,0); ctx.clearRect(0,0, canvas.width, canvas.height);
+  // camera transform — use DPR compensation
+  ctx.setTransform(camera.scale*DPR,0,0,camera.scale*DPR, canvasW*DPR/2 - camera.x*camera.scale*DPR, canvasH*DPR/2 - camera.y*camera.scale*DPR);
+  world.draw(ctx,camera,canvas,atlas);
+  player.draw(ctx);
+  // draw rocks/trees etc already done in world.draw; draw cursor marker
   ctx.save(); ctx.beginPath(); ctx.arc(input.mouse.worldX, input.mouse.worldY, 3,0,Math.PI*2); ctx.fillStyle='rgba(0,0,0,0.6)'; ctx.fill(); ctx.restore();
-  // subtle grid (very light)
-  ctx.save(); ctx.globalAlpha = 0.03; ctx.lineWidth = 1; ctx.strokeStyle = '#000'; const left = Math.floor((camera.x - (canvas.width/2)/camera.scale)/TILE) - 1; const right = Math.ceil((camera.x + (canvas.width/2)/camera.scale)/TILE) + 1; const top = Math.floor((camera.y - (canvas.height/2)/camera.scale)/TILE) -1; const bottom = Math.ceil((camera.y + (canvas.height/2)/camera.scale)/TILE) +1; for(let x=left;x<=right;x++){ ctx.beginPath(); ctx.moveTo(x*TILE, top*TILE); ctx.lineTo(x*TILE, bottom*TILE); ctx.stroke(); } for(let y=top;y<=bottom;y++){ ctx.beginPath(); ctx.moveTo(left*TILE, y*TILE); ctx.lineTo(right*TILE, y*TILE); ctx.stroke(); } ctx.restore(); ctx.setTransform(1,0,0,1,0,0);
+  // subtle grid
+  ctx.save(); ctx.globalAlpha = 0.02; ctx.lineWidth = 1; ctx.strokeStyle = '#000'; const left = Math.floor((camera.x - (canvasW/2)/camera.scale)/TILE) - 1; const right = Math.ceil((camera.x + (canvasW/2)/camera.scale)/TILE) + 1; const top = Math.floor((camera.y - (canvasH/2)/camera.scale)/TILE) -1; const bottom = Math.ceil((camera.y + (canvasH/2)/camera.scale)/TILE) +1; for(let x=left;x<=right;x++){ ctx.beginPath(); ctx.moveTo(x*TILE, top*TILE); ctx.lineTo(x*TILE, bottom*TILE); ctx.stroke(); } for(let y=top;y<=bottom;y++){ ctx.beginPath(); ctx.moveTo(left*TILE, y*TILE); ctx.lineTo(right*TILE, y*TILE); ctx.stroke(); } ctx.restore();
 }
-
-// -----------------------------------------------------------------------------
-// Resize
-function resizeCanvas(){ const vw = Math.max(600, Math.min(window.innerWidth - 40, CANVAS_BASE_W)); const vh = Math.max(360, Math.min(window.innerHeight - 40, CANVAS_BASE_H)); canvas.width = vw; canvas.height = vh; }
 
 </script>
 </body>
