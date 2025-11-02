@@ -23,15 +23,8 @@
   </div>
 
 <script>
-// MineLite: fullscreen top-down demo
-// Changes per request:
-// - Site title: MineLite
-// - Player is a blocky person (square head/body/limbs)
-// - Camera default zoomed in more; zoom-out range reduced
-// - World-end barrier (water) extended outward so you can't see the map edge (island feel)
-// - Trees still 2x2; rocks offset randomly; grass shades mix
+// MineLite — updated collisions, spawn safety, rock/tree placement rules, top-down player head
 
-// -----------------------------------------------------------------------------
 const TILE = 32;
 const MAP_W = 160;
 const MAP_H = 110;
@@ -43,17 +36,13 @@ const TILE_DIRT = GRASS_VARIANTS;    // 4
 const TILE_WATER = GRASS_VARIANTS+1; // 5
 
 const OBJ_NONE = 0, OBJ_ROCK = 1, OBJ_TREE = 2;
-
-// Barrier thickness in tiles (large so water extends inward and outwards visually)
 const BARRIER_THICKNESS = Math.max(10, Math.floor(Math.min(MAP_W, MAP_H) * 0.12));
 
-// -----------------------------------------------------------------------------
 function makeSeededRandom(seed){ let s = seed>>>0; return function(){ s = (s + 0x6D2B79F5) | 0; let t = Math.imul(s ^ s>>>15, 1 | s); t = (t + Math.imul(t ^ t>>>7, 61 | t)) ^ t; return ((t ^ t>>>14) >>> 0) / 4294967296; } }
 function smoothstep(a){ return a*a*(3-2*a); }
 function valueNoise2D(x,y,seed){ const xf=Math.floor(x), yf=Math.floor(y); const rx=x-xf, ry=y-yf; const u=smoothstep(rx), v=smoothstep(ry); const r00 = makeSeededRandom(((xf*73856093) ^ (yf*19349663) ^ seed)>>>0)(); const r10 = makeSeededRandom((((xf+1)*73856093) ^ (yf*19349663) ^ seed)>>>0)(); const r01 = makeSeededRandom(((xf*73856093) ^ ((yf+1)*19349663) ^ seed)>>>0)(); const r11 = makeSeededRandom((((xf+1)*73856093) ^ ((yf+1)*19349663) ^ seed)>>>0)(); const xa = r00*(1-u) + r10*u; const xb = r01*(1-u) + r11*u; return xa*(1-v) + xb*v; }
 function octaveNoise(x,y,seed,oct=4,scale=1){ let amp=1,freq=1,sum=0,tot=0; for(let i=0;i<oct;i++){ sum += valueNoise2D(x*freq/scale, y*freq/scale, seed + i*1000) * amp; tot += amp; amp *= 0.5; freq *= 2; } return sum/tot; }
 
-// -----------------------------------------------------------------------------
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 let canvasW=0, canvasH=0;
@@ -66,7 +55,17 @@ window.addEventListener('gesturestart', e=>{ e.preventDefault(); }, {passive:fal
 
 // -----------------------------------------------------------------------------
 class World {
-  constructor(w,h){ this.w=w; this.h=h; this.tiles = new Uint8Array(w*h); this.objects = new Uint8Array(w*h); this.grassVariant = new Uint8Array(w*h); this.rockOffsetX = new Float32Array(w*h); this.rockOffsetY = new Float32Array(w*h); this.treeAnchor = new Uint8Array(w*h); this.seed = Math.floor(Math.random()*1e9); this.generate(); }
+  constructor(w,h){
+    this.w=w; this.h=h;
+    this.tiles = new Uint8Array(w*h);
+    this.objects = new Uint8Array(w*h);
+    this.grassVariant = new Uint8Array(w*h);
+    this.rockOffsetX = new Float32Array(w*h);
+    this.rockOffsetY = new Float32Array(w*h);
+    this.treeAnchor = new Uint8Array(w*h);
+    this.seed = Math.floor(Math.random()*1e9);
+    this.generate();
+  }
   idx(x,y){ return y*this.w + x; }
   inBounds(x,y){ return x>=0 && y>=0 && x<this.w && y<this.h; }
   getTile(x,y){ if(!this.inBounds(x,y)) return TILE_WATER; return this.tiles[this.idx(x,y)]; }
@@ -74,18 +73,16 @@ class World {
   setTile(x,y,v){ if(!this.inBounds(x,y)) return; this.tiles[this.idx(x,y)] = v; }
   setObject(x,y,v){ if(!this.inBounds(x,y)) return; this.objects[this.idx(x,y)] = v; }
 
-  generate(){ const seed = this.seed; const biomeScale = 90; const localScale = 8;
+  generate(){
+    const seed = this.seed; const biomeScale = 90; const localScale = 8;
     const biome = new Float32Array(this.w*this.h);
     for(let y=0;y<this.h;y++) for(let x=0;x<this.w;x++) biome[this.idx(x,y)] = octaveNoise(x,y,seed,5,biomeScale);
 
     const rnd = makeSeededRandom(seed+42);
     for(let y=0;y<this.h;y++){
       for(let x=0;x<this.w;x++){
-        const i = this.idx(x,y);
-        const b = biome[i];
-        // big water barrier ring
+        const i = this.idx(x,y); const b = biome[i];
         if(x < BARRIER_THICKNESS || y < BARRIER_THICKNESS || x > this.w-1-BARRIER_THICKNESS || y > this.h-1-BARRIER_THICKNESS){ this.tiles[i] = TILE_WATER; continue; }
-        // biome assignment (less mixing)
         if(b < 0.35){ const local = octaveNoise(x,y,seed+2000,3,localScale); this.tiles[i] = (local < 0.5) ? TILE_WATER : TILE_GRASS_BASE + Math.floor(octaveNoise(x,y,seed+7000,2,4)*GRASS_VARIANTS); }
         else if(b < 0.67){ this.tiles[i] = TILE_GRASS_BASE + Math.floor(octaveNoise(x,y,seed+3000,3,6)*GRASS_VARIANTS); }
         else { const local = octaveNoise(x,y,seed+4000,3,6); this.tiles[i] = (local < 0.6) ? TILE_DIRT : TILE_GRASS_BASE + Math.floor(octaveNoise(x,y,seed+8000,2,4)*GRASS_VARIANTS); }
@@ -93,71 +90,123 @@ class World {
       }
     }
 
-    // Place trees and rocks
+    // Place trees and rocks — trees and rocks cannot share a tile
     const placeRnd = makeSeededRandom(seed+9999);
     for(let y=2; y<this.h-2; y++){
       for(let x=2; x<this.w-2; x++){
         const i = this.idx(x,y); const t = this.tiles[i]; if(t === TILE_WATER) continue;
         const b = biome[i]; let treeChance = 0.01; if(b >= 0.33 && b < 0.67) treeChance = 0.06; if(b >= 0.67) treeChance = 0.02;
-        if(x < this.w-2 && y < this.h-2 && placeRnd() < treeChance){ let ok=true; for(let yy=y; yy<y+2; yy++) for(let xx=x; xx<x+2; xx++){ const idx2 = this.idx(xx,yy); if(this.tiles[idx2] === TILE_WATER) ok=false; if(this.objects[idx2] !== OBJ_NONE) ok=false; } if(ok){ for(let yy=y; yy<y+2; yy++) for(let xx=x; xx<x+2; xx++){ this.objects[this.idx(xx,yy)] = OBJ_TREE; } this.treeAnchor[i] = 1; continue; } }
-        if(placeRnd() < 0.025){ this.objects[i] = OBJ_ROCK; const maxOff = TILE*0.36; this.rockOffsetX[i] = (placeRnd()*2-1)*maxOff; this.rockOffsetY[i] = (placeRnd()*2-1)*maxOff; }
+        // place 2x2 tree anchored at top-left only (check availability)
+        if(x < this.w-2 && y < this.h-2 && placeRnd() < treeChance){
+          let ok=true; for(let yy=y; yy<y+2; yy++) for(let xx=x; xx<x+2; xx++){ const idx2 = this.idx(xx,yy); if(this.tiles[idx2] === TILE_WATER) ok=false; if(this.objects[idx2] !== OBJ_NONE) ok=false; }
+          if(ok){ for(let yy=y; yy<y+2; yy++) for(let xx=x; xx<x+2; xx++){ this.objects[this.idx(xx,yy)] = OBJ_TREE; } this.treeAnchor[i] = 1; continue; }
+        }
+        // rocks: only place if tile currently has no object
+        if(this.objects[i] === OBJ_NONE && placeRnd() < 0.025){ this.objects[i] = OBJ_ROCK; const maxOff = TILE*0.36; this.rockOffsetX[i] = (placeRnd()*2-1)*maxOff; this.rockOffsetY[i] = (placeRnd()*2-1)*maxOff; }
       }
     }
   }
 
-  draw(ctx,camera,canvas,atlas){ const left = Math.max(0, Math.floor((camera.x - (canvas.width/2)/camera.scale)/TILE) - 1); const right = Math.min(this.w-1, Math.ceil((camera.x + (canvas.width/2)/camera.scale)/TILE) + 1); const top = Math.max(0, Math.floor((camera.y - (canvas.height/2)/camera.scale)/TILE) -1); const bottom = Math.min(this.h-1, Math.ceil((camera.y + (canvas.height/2)/camera.scale)/TILE) +1);
-    for(let yy=top; yy<=bottom; yy++){ for(let xx=left; xx<=right; xx++){ const i=this.idx(xx,yy); const tile=this.tiles[i]; if(tile >= TILE_GRASS_BASE && tile < TILE_GRASS_BASE+GRASS_VARIANTS){ const varIdx = this.grassVariant[i]; ctx.drawImage(atlas, varIdx*TILE, 0, TILE, TILE, xx*TILE, yy*TILE, TILE, TILE); } else if(tile === TILE_DIRT){ ctx.drawImage(atlas, GRASS_VARIANTS*TILE, 0, TILE, TILE, xx*TILE, yy*TILE, TILE, TILE); } else { ctx.drawImage(atlas, (GRASS_VARIANTS+1)*TILE, 0, TILE, TILE, xx*TILE, yy*TILE, TILE, TILE); } } }
-    for(let yy=top; yy<=bottom; yy++){ for(let xx=left; xx<=right; xx++){ const i=this.idx(xx,yy); const o=this.objects[i]; if(o === OBJ_ROCK){ const cx = xx*TILE + TILE/2 + this.rockOffsetX[i]; const cy = yy*TILE + TILE/2 + this.rockOffsetY[i]; drawRock(ctx,cx,cy); } else if(o === OBJ_TREE && this.treeAnchor[i]){ const cx = xx*TILE + TILE; const cy = yy*TILE + TILE; drawTreeLarge(ctx,cx,cy); } } }
+  // find nearest safe spawn (not water, not tree area)
+  findSafeSpawn(){ const cx = Math.floor(this.w/2), cy = Math.floor(this.h/2); const maxR = Math.max(this.w,this.h); for(let r=0;r<maxR;r++){ for(let dy=-r; dy<=r; dy++){ for(let dx=-r; dx<=r; dx++){ const x = cx + dx; const y = cy + dy; if(!this.inBounds(x,y)) continue; const i=this.idx(x,y); if(this.tiles[i] === TILE_WATER) continue; if(this.objects[i] === OBJ_TREE) continue; // also ensure surrounding 1 tile free so player can move
+                let blocked=false; for(let yy=y-1; yy<=y+1; yy++) for(let xx=x-1; xx<=x+1; xx++){ if(!this.inBounds(xx,yy)){ blocked=true; break; } const idx2=this.idx(xx,yy); if(this.tiles[idx2] === TILE_WATER) blocked=true; if(this.objects[idx2] === OBJ_TREE) blocked=true; } if(blocked) continue; return {x: x*TILE + TILE/2, y: y*TILE + TILE/2}; } } } return {x: cx*TILE + TILE/2, y: cy*TILE + TILE/2}; }
+
+  draw(ctx,camera,canvas,atlas){
+    const left = Math.max(0, Math.floor((camera.x - (canvas.width/2)/camera.scale)/TILE) - 1);
+    const right = Math.min(this.w-1, Math.ceil((camera.x + (canvas.width/2)/camera.scale)/TILE) + 1);
+    const top = Math.max(0, Math.floor((camera.y - (canvas.height/2)/camera.scale)/TILE) -1);
+    const bottom = Math.min(this.h-1, Math.ceil((camera.y + (canvas.height/2)/camera.scale)/TILE) +1);
+
+    for(let yy=top; yy<=bottom; yy++){
+      for(let xx=left; xx<=right; xx++){
+        const i=this.idx(xx,yy); const tile=this.tiles[i];
+        if(tile >= TILE_GRASS_BASE && tile < TILE_GRASS_BASE+GRASS_VARIANTS){ const varIdx = this.grassVariant[i]; ctx.drawImage(atlas, varIdx*TILE, 0, TILE, TILE, xx*TILE, yy*TILE, TILE, TILE); }
+        else if(tile === TILE_DIRT){ ctx.drawImage(atlas, GRASS_VARIANTS*TILE, 0, TILE, TILE, xx*TILE, yy*TILE, TILE, TILE); }
+        else { ctx.drawImage(atlas, (GRASS_VARIANTS+1)*TILE, 0, TILE, TILE, xx*TILE, yy*TILE, TILE, TILE); }
+      }
+    }
+
+    // objects: rocks and tree anchors (trees drawn as large canopy occupying 2x2 but collision uses trunk)
+    for(let yy=top; yy<=bottom; yy++){
+      for(let xx=left; xx<=right; xx++){
+        const i=this.idx(xx,yy); const o=this.objects[i];
+        if(o === OBJ_ROCK){ const cx = xx*TILE + TILE/2 + this.rockOffsetX[i]; const cy = yy*TILE + TILE/2 + this.rockOffsetY[i]; drawRock(ctx, cx, cy); }
+        else if(o === OBJ_TREE && this.treeAnchor[i]){ const cx = xx*TILE + TILE; const cy = yy*TILE + TILE; drawTreeLarge(ctx, cx, cy); }
+      }
+    }
   }
 }
 
-// -----------------------------------------------------------------------------
 function drawRock(ctx,cx,cy){ ctx.save(); ctx.translate(cx,cy); ctx.beginPath(); ctx.ellipse(0,0,6,5,0,0,Math.PI*2); ctx.fillStyle='#6b665b'; ctx.fill(); ctx.strokeStyle='rgba(0,0,0,0.25)'; ctx.stroke(); ctx.restore(); }
 function drawTreeLarge(ctx,cx,cy){ ctx.save(); ctx.translate(cx,cy); ctx.fillStyle='#6a4b2a'; ctx.fillRect(-6,6,12,12); ctx.beginPath(); ctx.ellipse(0,-4,26,20,0,0,Math.PI*2); ctx.fillStyle='#147a2c'; ctx.fill(); ctx.beginPath(); ctx.ellipse(-8,-14,18,14,0,0,Math.PI*2); ctx.fillStyle='#1aa13a'; ctx.fill(); ctx.beginPath(); ctx.ellipse(12,-12,14,10,0,0,Math.PI*2); ctx.fillStyle='#0f6b24'; ctx.fill(); ctx.restore(); }
 
-// -----------------------------------------------------------------------------
 function createTileAtlas(){ const off=document.createElement('canvas'); off.width=(GRASS_VARIANTS+2)*TILE; off.height=TILE; const oc=off.getContext('2d'); const grassColors=[['#7cc85b','#4fa043'],['#6fb23a','#4b8d2e'],['#8bdc66','#52a544'],['#5fb03a','#3f7b2a']]; for(let v=0; v<GRASS_VARIANTS; v++){ const gx=v*TILE; const g=oc.createLinearGradient(gx,0,gx+TILE,TILE); g.addColorStop(0,grassColors[v][0]); g.addColorStop(1,grassColors[v][1]); oc.fillStyle=g; oc.fillRect(gx,0,TILE,TILE); for(let i=0;i<40;i++){ oc.fillStyle=`rgba(0,0,0,${Math.random()*0.04})`; oc.fillRect(gx+Math.random()*TILE, Math.random()*TILE, 1,1); } } const dx=GRASS_VARIANTS*TILE; const dg=oc.createLinearGradient(dx,0,dx+TILE,TILE); dg.addColorStop(0,'#9f6b3a'); dg.addColorStop(1,'#7a4b2a'); oc.fillStyle=dg; oc.fillRect(dx,0,TILE,TILE); for(let i=0;i<30;i++){ oc.fillStyle=`rgba(0,0,0,${Math.random()*0.05})`; oc.fillRect(dx+Math.random()*TILE, Math.random()*TILE, 1,1); } const wx=(GRASS_VARIANTS+1)*TILE; const wg=oc.createLinearGradient(wx,0,wx+TILE,TILE); wg.addColorStop(0,'#3aa9df'); wg.addColorStop(1,'#1f6fa8'); oc.fillStyle=wg; oc.fillRect(wx,0,TILE,TILE); oc.globalAlpha=0.08; for(let i=0;i<3;i++){ oc.fillRect(wx + i*6 + 2, 6 + i*3, TILE-8, 2); } oc.globalAlpha=1; return off; }
 
 // -----------------------------------------------------------------------------
-class Input{ constructor(canvas){ this.keys={}; this.mouse={x:0,y:0,worldX:0,worldY:0}; canvas.addEventListener('mousemove', e=>{ const r=canvas.getBoundingClientRect(); this.mouse.x=e.clientX-r.left; this.mouse.y=e.clientY-r.top; }); canvas.addEventListener('wheel', e=>{ e.preventDefault(); if(!e.ctrlKey) camera.targetScale = clamp(camera.targetScale * (1 - e.deltaY * 0.0012), 1.0, 1.25); }, {passive:false}); window.addEventListener('keydown', e=>{ this.keys[e.key.toLowerCase()] = true; }); window.addEventListener('keyup', e=>{ this.keys[e.key.toLowerCase()] = false; }); } isDown(k){ return !!this.keys[k.toLowerCase()]; } }
+class Input{ constructor(canvas){ this.keys={}; this.mouse={x:0,y:0,worldX:0,worldY:0}; canvas.addEventListener('mousemove', e=>{ const r=canvas.getBoundingClientRect(); this.mouse.x=e.clientX-r.left; this.mouse.y=e.clientY-r.top; }); canvas.addEventListener('wheel', e=>{ e.preventDefault(); if(!e.ctrlKey) camera.targetScale = clamp(camera.targetScale * (1 - e.deltaY * 0.0012), 1.05, 1.25); }, {passive:false}); window.addEventListener('keydown', e=>{ this.keys[e.key.toLowerCase()] = true; }); window.addEventListener('keyup', e=>{ this.keys[e.key.toLowerCase()] = false; }); } isDown(k){ return !!this.keys[k.toLowerCase()]; } }
+
+class Camera{ constructor(x=0,y=0,scale=1.25){ this.x=x; this.y=y; this.scale=scale; this.targetScale=scale; this.smooth=0.12; this.zoomSmooth=0.12; } update(dt,tx,ty){ this.x = lerp(this.x, tx, this.smooth); this.y = lerp(this.y, ty, this.smooth); this.scale = lerp(this.scale, this.targetScale, this.zoomSmooth); } screenToWorld(sx,sy,canvas){ const wx = (sx - canvas.width/(2*DPR))/this.scale + this.x; const wy = (sy - canvas.height/(2*DPR))/this.scale + this.y; return {x:wx,y:wy}; } }
 
 // -----------------------------------------------------------------------------
-class Camera{ constructor(x=0,y=0,scale=1.15){ this.x=x; this.y=y; this.scale=scale; this.targetScale=scale; this.smooth=0.12; this.zoomSmooth=0.12; } update(dt,tx,ty){ this.x = lerp(this.x, tx, this.smooth); this.y = lerp(this.y, ty, this.smooth); this.scale = lerp(this.scale, this.targetScale, this.zoomSmooth); } screenToWorld(sx,sy,canvas){ const wx = (sx - canvas.width/(2*DPR))/this.scale + this.x; const wy = (sy - canvas.height/(2*DPR))/this.scale + this.y; return {x:wx,y:wy}; } }
-
-// -----------------------------------------------------------------------------
-// Blocky player model: head, body, arms, legs — rotate as a unit
-class Player{ constructor(x,y){ this.x=x; this.y=y; this.radius=12; this.speed=170; this.angle=0; } update(dt,input,world,camera,canvas){ let vx=0,vy=0; if(input.isDown('w')||input.isDown('arrowup')) vy-=1; if(input.isDown('s')||input.isDown('arrowdown')) vy+=1; if(input.isDown('a')||input.isDown('arrowleft')) vx-=1; if(input.isDown('d')||input.isDown('arrowright')) vx+=1; const mag=Math.hypot(vx,vy); if(mag>0){ vx/=mag; vy/=mag; } const nx=this.x + vx*this.speed*dt; const ny=this.y + vy*this.speed*dt; const collides=(px,py)=>{ const tx=Math.floor(px/TILE); const ty=Math.floor(py/TILE); const tile = world.getTile(tx,ty); if(tile === TILE_WATER) return true; if(world.getObject(tx,ty) === OBJ_TREE) return true; return false; }; if(!collides(nx, this.y)) this.x = nx; if(!collides(this.x, ny)) this.y = ny; const mw = camera.screenToWorld(input.mouse.x, input.mouse.y, canvas); this.angle = Math.atan2(mw.y - this.y, mw.x - this.x); }
+// Player: top-down head-only sprite (rotates to face cursor). Collision uses trunk-aware checks so you can fit between trees
+class Player{ constructor(x,y){ this.x=x; this.y=y; this.radius=10; this.speed=170; this.angle=0; }
+  update(dt,input,world,camera,canvas){ let vx=0,vy=0; if(input.isDown('w')||input.isDown('arrowup')) vy-=1; if(input.isDown('s')||input.isDown('arrowdown')) vy+=1; if(input.isDown('a')||input.isDown('arrowleft')) vx-=1; if(input.isDown('d')||input.isDown('arrowright')) vx+=1; const mag=Math.hypot(vx,vy); if(mag>0){ vx/=mag; vy/=mag; }
+    const nx = this.x + vx*this.speed*dt; const ny = this.y + vy*this.speed*dt;
+    const collides = (px,py) => {
+      const tx = Math.floor(px/TILE), ty = Math.floor(py/TILE);
+      const tile = world.getTile(tx,ty);
+      if(tile === TILE_WATER) return true; // water barrier
+      // tree collision: check nearby 2x2 anchored trees and use trunk rectangle for blocking
+      // find anchors in a 2x2 neighborhood
+      for(let ay = ty-1; ay <= ty+1; ay++){
+        for(let ax = tx-1; ax <= tx+1; ax++){
+          if(!world.inBounds(ax,ay)) continue;
+          const ai = world.idx(ax,ay);
+          if(world.treeAnchor[ai]){
+            const anchorX = ax; const anchorY = ay; // top-left tile of tree
+            // trunk rectangle position (world coords) — centered near bottom middle of 2x2
+            const trunkCenterX = anchorX*TILE + TILE; // center x of 2x2
+            const trunkCenterY = anchorY*TILE + TILE + 6; // slightly lower than center
+            const trunkW = 14; const trunkH = 12;
+            const left = trunkCenterX - trunkW/2, right = trunkCenterX + trunkW/2;
+            const topRect = trunkCenterY - trunkH/2, bottomRect = trunkCenterY + trunkH/2;
+            if(px >= left && px <= right && py >= topRect && py <= bottomRect) return true;
+          }
+        }
+      }
+      return false;
+    };
+    if(!collides(nx, this.y)) this.x = nx; if(!collides(this.x, ny)) this.y = ny;
+    const mw = camera.screenToWorld(input.mouse.x, input.mouse.y, canvas); this.angle = Math.atan2(mw.y - this.y, mw.x - this.x);
+  }
   draw(ctx){ ctx.save(); ctx.translate(this.x, this.y); ctx.rotate(this.angle);
-    // Draw blocky person centered
-    // body
-    ctx.fillStyle = '#3b82f6'; ctx.fillRect(-8, -6, 16, 18);
-    // head
-    ctx.fillStyle = '#ffd8a8'; ctx.fillRect(-7, -24, 14, 14);
-    // left arm
-    ctx.fillStyle = '#275bb3'; ctx.fillRect(-14, -4, 6, 12);
-    // right arm
-    ctx.fillRect(8, -4, 6, 12);
-    // legs
-    ctx.fillStyle = '#1f4ea6'; ctx.fillRect(-6, 10, 6, 10); ctx.fillRect(0, 10, 6, 10);
-    // simple face
-    ctx.fillStyle = '#000'; ctx.fillRect(-3, -20, 2, 2); ctx.fillRect(1, -20, 2, 2); ctx.restore(); }
+    // draw head (top-down square) and small shoulders shadow — rotate to face cursor
+    ctx.fillStyle = '#ffd8a8'; ctx.fillRect(-8, -8, 16, 16);
+    // small hair / helmet rotated marker (a darker rectangle to indicate direction)
+    ctx.fillStyle = '#2b2b2b'; ctx.fillRect(4, -4, 6, 6);
+    // small shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.15)'; ctx.fillRect(-7, 9, 14, 4);
+    ctx.restore(); }
 }
 
-// -----------------------------------------------------------------------------
 function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); } function lerp(a,b,t){ return a + (b-a)*t; }
 
 // -----------------------------------------------------------------------------
-const world = new World(MAP_W, MAP_H); const atlas = createTileAtlas(); const player = new Player(MAP_W*TILE/2, MAP_H*TILE/2); const camera = new Camera(player.x, player.y, 1.15); const input = new Input(canvas);
+const world = new World(MAP_W, MAP_H);
+const atlas = createTileAtlas();
+// spawn player in a safe spot
+const spawn = world.findSafeSpawn();
+const player = new Player(spawn.x, spawn.y);
+const camera = new Camera(player.x, player.y, 1.25);
+const input = new Input(canvas);
 
 let last = performance.now(); function gameLoop(now){ const dt = Math.min((now-last)/1000, 1/15); last = now; player.update(dt,input,world,camera,canvas); camera.update(dt,player.x,player.y); const mw = camera.screenToWorld(input.mouse.x, input.mouse.y, canvas); input.mouse.worldX = mw.x; input.mouse.worldY = mw.y; render(); requestAnimationFrame(gameLoop); } requestAnimationFrame(gameLoop);
 
 function render(){ ctx.setTransform(DPR,0,0,DPR,0,0); ctx.clearRect(0,0, canvas.width, canvas.height);
-  // camera transform
   ctx.setTransform(camera.scale*DPR,0,0,camera.scale*DPR, canvasW*DPR/2 - camera.x*camera.scale*DPR, canvasH*DPR/2 - camera.y*camera.scale*DPR);
   world.draw(ctx,camera,canvas,atlas);
   player.draw(ctx);
-  // cursor
-  ctx.save(); ctx.beginPath(); ctx.arc(input.mouse.worldX, input.mouse.worldY, 3,0,Math.PI*2); ctx.fillStyle='rgba(0,0,0,0.6)'; ctx.fill(); ctx.restore();
+  // no cursor marker (removed as requested)
   // subtle grid
   ctx.save(); ctx.globalAlpha = 0.02; ctx.lineWidth = 1; ctx.strokeStyle = '#000'; const left = Math.floor((camera.x - (canvasW/2)/camera.scale)/TILE) - 1; const right = Math.ceil((camera.x + (canvasW/2)/camera.scale)/TILE) + 1; const top = Math.floor((camera.y - (canvasH/2)/camera.scale)/TILE) -1; const bottom = Math.ceil((camera.y + (canvasH/2)/camera.scale)/TILE) +1; for(let x=left;x<=right;x++){ ctx.beginPath(); ctx.moveTo(x*TILE, top*TILE); ctx.lineTo(x*TILE, bottom*TILE); ctx.stroke(); } for(let y=top;y<=bottom;y++){ ctx.beginPath(); ctx.moveTo(left*TILE, y*TILE); ctx.lineTo(right*TILE, y*TILE); ctx.stroke(); } ctx.restore(); }
 
