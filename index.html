@@ -10,29 +10,28 @@
 <canvas id="game"></canvas>
 <script>
 /*
-  Minecraft Lite (2D top-down) — improved
-  - Movement fixed (WASD), immediate response
-  - Camera with smooth zoom in/out (wheel) and limits
-  - Chunk-based rendering + caching for performance
-  - Improved terrain generation (multi-octave smooth value noise -> elevation + moisture -> sensible tiles)
-  - Cursor-facing player, break/place blocks with mouse buttons
-
-  Single-file for easy testing. Tweak CONFIG for map size, tile size, chunk size.
+  Minecraft Lite (2D top-down) — fixes requested by user
+  - Player movement fixed (grass/dirt/sand are walkable; only stone & water block)
+  - Camera is strictly centered on the player (no lag)
+  - Player rotation uses exact camera center -> faces cursor accurately
+  - Much larger map (512x512) while keeping chunk caching for performance
+  - Zoom limits tightened: can't zoom out much, can zoom in a lot more
+  - Some small performance-aware tweaks
 */
 
 // ===== CONFIG =====
 const CONFIG = {
   title: 'Minecraft Lite',
-  baseTileSize: 28,    // reference pixels per tile at zoom = 1
-  mapW: 128,
-  mapH: 128,
-  chunkSize: 16,       // tiles per chunk (square)
-  playerSpeed: 160,   // px/s
-  breakPlaceRange: 5,  // tiles
+  baseTileSize: 22,    // pixels per tile at zoom = 1 (smaller to fit more)
+  mapW: 512,          // much larger world
+  mapH: 512,
+  chunkSize: 16,
+  playerSpeed: 200,   // px/s
+  breakPlaceRange: 6,  // tiles
   seed: 1337,
-  minZoom: 0.6,        // can't zoom out past this (smaller = more world visible)
-  maxZoom: 2.0,        // can't zoom in past this
-  zoomSpeed: 0.0016,   // wheel sensitivity
+  minZoom: 0.9,        // cannot zoom out much (shows less world)
+  maxZoom: 6.0,        // can zoom in a lot
+  zoomSpeed: 0.0012,
 };
 
 // ===== Canvas / DPR =====n
@@ -44,28 +43,25 @@ function resize(){
   canvas.style.height = innerHeight + 'px';
   canvas.width = Math.floor(innerWidth * dpr);
   canvas.height = Math.floor(innerHeight * dpr);
-  ctx.setTransform(dpr,0,0,dpr,0,0); // keep drawing in CSS pixels
+  // We will draw in CSS pixels; when using canvas.width/height we account for dpr in transforms
 }
 window.addEventListener('resize', resize);
 resize();
 
-// ===== Deterministic hashed value + smooth interpolation =====
+// ===== Simple deterministic noise =====
 function hashInt(x,y,seed){
-  // 32-bit hashing
   let n = (x*374761393 + y*668265263) ^ (seed + 0x9e3779b9);
   n = (n ^ (n >>> 13)) * 1274126177;
   n = (n ^ (n >>> 16)) >>> 0;
   return n;
 }
 function valueNoise(x,y,seed){
-  // x,y are floats. We do bilinear interpolation between integer grid hashed values.
   const x0 = Math.floor(x), y0 = Math.floor(y);
   const tx = x - x0, ty = y - y0;
   const s00 = hashInt(x0,y0,seed) / 4294967295;
   const s10 = hashInt(x0+1,y0,seed) / 4294967295;
   const s01 = hashInt(x0,y0+1,seed) / 4294967295;
   const s11 = hashInt(x0+1,y0+1,seed) / 4294967295;
-  // smoothstep interpolation
   const ux = tx * tx * (3 - 2 * tx);
   const uy = ty * ty * (3 - 2 * ty);
   const a = s00 * (1-ux) + s10 * ux;
@@ -73,248 +69,155 @@ function valueNoise(x,y,seed){
   return a * (1-uy) + b * uy;
 }
 function fractalNoise(x,y,octaves,seed){
-  let amp = 1, freq = 1, sum = 0, max = 0;
-  for(let i=0;i<octaves;i++){
-    sum += valueNoise(x * freq, y * freq, seed + i*1000) * amp;
-    max += amp;
-    amp *= 0.5;
-    freq *= 2;
-  }
-  return sum / max;
+  let amp=1,freq=1,sum=0,max=0;
+  for(let i=0;i<octaves;i++){ sum += valueNoise(x*freq,y*freq,seed+i*1000)*amp; max += amp; amp*=0.5; freq*=2; }
+  return sum/max;
 }
 
 // ===== World & Tiles =====
-// tile types: 0=air, 1=grass, 2=dirt, 3=stone, 4=water, 5=sand
+// 0=air,1=grass,2=dirt,3=stone,4=water,5=sand
 const W = CONFIG.mapW, H = CONFIG.mapH;
-const map = new Uint8Array(W * H);
-const elevation = new Float32Array(W * H);
-const moisture = new Float32Array(W * H);
+const map = new Uint8Array(W*H);
+const elevation = new Float32Array(W*H);
+const moisture = new Float32Array(W*H);
 
 function generateTerrain(){
   for(let y=0;y<H;y++){
     for(let x=0;x<W;x++){
-      // normalized coordinates to reduce edge tiling
       const nx = x / W - 0.5, ny = y / H - 0.5;
-
-      // elevation: combine large-scale and fine details
-      const e = fractalNoise(nx * 8 + 100, ny * 8 + 200, 5, CONFIG.seed);
-      // add ridge to center to make continents (optional)
+      const e = fractalNoise(nx*8 + 100, ny*8 + 200, 5, CONFIG.seed);
       const dist = Math.hypot(nx, ny);
-      const ridge = 1 - Math.pow(Math.min(1, dist*1.8), 1.1);
+      const ridge = 1 - Math.pow(Math.min(1, dist*1.7), 1.1);
       const elev = e * 0.9 + ridge * 0.2;
-
-      // moisture uses different noise
-      const m = fractalNoise(nx * 12 + 400, ny * 12 + 600, 4, CONFIG.seed+999);
+      const m = fractalNoise(nx*12 + 400, ny*12 + 600, 4, CONFIG.seed+999);
 
       const idx = y*W + x;
-      elevation[idx] = elev;
-      moisture[idx] = m;
-
-      // final tile decision
-      let t = 1; // grass
-      if(elev < 0.35) t = 4;            // water
-      else if(elev < 0.45) t = 5;       // sand (beaches)
-      else if(elev < 0.65){
-        // lowlands: if very wet -> swamp (we'll keep as grass but prioritize dirt patches)
-        t = (m > 0.6 && elev < 0.55) ? 2 : 1; // dirt patches
-      } else if(elev < 0.85) t = 2;     // dirt / hills
-      else t = 3;                        // stone / mountains
-
-      // small lakes: if basin
-      // (detect local lower elevation)
-      // Simple check: if neighbors all higher and elev moderate -> water
-      if(e < 0.5){
-        // don't override beaches
-      }
-
+      elevation[idx] = elev; moisture[idx] = m;
+      let t = 1;
+      if(elev < 0.34) t = 4;           // water
+      else if(elev < 0.44) t = 5;      // sand/beach
+      else if(elev < 0.65){ t = (m > 0.62 && elev < 0.56) ? 2 : 1; }
+      else if(elev < 0.85) t = 2;      // dirt/hills
+      else t = 3;                      // stone/mountain
       map[idx] = t;
     }
   }
-  // carve a spawn clearing near center
+  // clear spawn area
   const cx = Math.floor(W/2), cy = Math.floor(H/2);
-  for(let oy=-3;oy<=3;oy++) for(let ox=-3;ox<=3;ox++){
-    const tx = cx+ox, ty = cy+oy; if(tx>=0 && ty>=0 && tx<W && ty<H) map[ty*W+tx] = 1;
-  }
+  for(let oy=-4;oy<=4;oy++) for(let ox=-4;ox<=4;ox++){ const tx=cx+ox, ty=cy+oy; if(tx>=0&&ty>=0&&tx<W&&ty<H) map[ty*W+tx]=1; }
 }
 
-function getTile(tx,ty){
-  if(tx<0||ty<0||tx>=W||ty>=H) return 3;
-  return map[ty*W + tx];
-}
+function getTile(tx,ty){ if(tx<0||ty<0||tx>=W||ty>=H) return 3; return map[ty*W + tx]; }
 function setTile(tx,ty,v){ if(tx<0||ty<0||tx>=W||ty>=H) return; map[ty*W + tx] = v; markChunkDirty(tx,ty); }
-function tileSolid(t){ return t !== 0 && t !== 4; }
+function tileSolid(t){
+  // Only stone and deep water block movement; grass/dirt/sand are walkable now
+  return t === 3 || t === 4;
+}
 
-// ===== Chunk rendering (cache canvas per chunk) =====
-const chunkCache = new Map(); // key = `${cx},${cy}` -> {canvas,ctx,dirty}
+// ===== Chunk caching =====nconst chunkCache = new Map();
 function chunkKey(cx,cy){ return cx + ',' + cy; }
 function createChunkCanvas(cx,cy){
-  const c = document.createElement('canvas');
-  const ctxc = c.getContext('2d');
-  const tile = CONFIG.baseTileSize;
-  const sizePx = tile * CONFIG.chunkSize;
-  c.width = sizePx; c.height = sizePx;
-  return {canvas:c, ctx:ctxc, dirty:true};
+  const tile = CONFIG.baseTileSize; const sizePx = tile * CONFIG.chunkSize;
+  const c = document.createElement('canvas'); c.width = sizePx; c.height = sizePx; const cctx = c.getContext('2d');
+  return {canvas:c, ctx:cctx, dirty:true, cx, cy};
 }
 function renderChunk(cx,cy){
   const key = chunkKey(cx,cy);
   let entry = chunkCache.get(key);
-  if(!entry) { entry = createChunkCanvas(cx,cy); chunkCache.set(key, entry); }
+  if(!entry){ entry = createChunkCanvas(cx,cy); chunkCache.set(key, entry); }
   if(!entry.dirty) return entry;
-
   const c = entry.canvas, cctx = entry.ctx;
-  // clear
   cctx.clearRect(0,0,c.width,c.height);
-
   const tile = CONFIG.baseTileSize;
-  const startX = cx * CONFIG.chunkSize;
-  const startY = cy * CONFIG.chunkSize;
-  for(let ry=0;ry<CONFIG.chunkSize;ry++){
-    for(let rx=0;rx<CONFIG.chunkSize;rx++){
+  const startX = cx * CONFIG.chunkSize, startY = cy * CONFIG.chunkSize;
+  for(let ry=0; ry<CONFIG.chunkSize; ry++){
+    for(let rx=0; rx<CONFIG.chunkSize; rx++){
       const tx = startX + rx, ty = startY + ry;
       const t = getTile(tx,ty);
       const sx = rx * tile, sy = ry * tile;
       drawTileToCtx(cctx, t, sx, sy, tile);
     }
   }
-  entry.dirty = false;
-  return entry;
+  entry.dirty = false; return entry;
 }
-function markChunkDirty(tx,ty){
-  const cx = Math.floor(tx / CONFIG.chunkSize), cy = Math.floor(ty / CONFIG.chunkSize);
-  const k = chunkKey(cx,cy);
-  const e = chunkCache.get(k);
-  if(e) e.dirty = true;
-}
+function markChunkDirty(tx,ty){ const cx = Math.floor(tx/CONFIG.chunkSize), cy = Math.floor(ty/CONFIG.chunkSize); const e = chunkCache.get(chunkKey(cx,cy)); if(e) e.dirty = true; }
 
 function drawTileToCtx(targetCtx, t, sx, sy, size){
-  switch(t){
-    case 0: targetCtx.fillStyle = '#9ec7ff'; targetCtx.fillRect(sx,sy,size,size); break; // air (sky)
-    case 1: targetCtx.fillStyle = '#5DB85B'; targetCtx.fillRect(sx,sy,size,size); break; // grass
-    case 2: targetCtx.fillStyle = '#8f6b45'; targetCtx.fillRect(sx,sy,size,size); break; // dirt
-    case 3: targetCtx.fillStyle = '#8B8B8B'; targetCtx.fillRect(sx,sy,size,size); break; // stone
-    case 4: targetCtx.fillStyle = '#4AA3D6'; targetCtx.fillRect(sx,sy,size,size); break; // water
-    case 5: targetCtx.fillStyle = '#e6d29c'; targetCtx.fillRect(sx,sy,size,size); break; // sand
-    default: targetCtx.fillStyle = '#000'; targetCtx.fillRect(sx,sy,size,size);
-  }
+  switch(t){ case 0: targetCtx.fillStyle = '#9ec7ff'; break; case 1: targetCtx.fillStyle = '#5DB85B'; break; case 2: targetCtx.fillStyle = '#8f6b45'; break; case 3: targetCtx.fillStyle = '#8B8B8B'; break; case 4: targetCtx.fillStyle = '#4AA3D6'; break; case 5: targetCtx.fillStyle = '#e6d29c'; break; default: targetCtx.fillStyle = '#000'; }
+  targetCtx.fillRect(sx,sy,size,size);
 }
 
 // ===== Player =====
 const player = {
   x: (W/2) * CONFIG.baseTileSize + CONFIG.baseTileSize/2,
   y: (H/2) * CONFIG.baseTileSize + CONFIG.baseTileSize/2,
-  radius: CONFIG.baseTileSize*0.4,
+  radius: CONFIG.baseTileSize*0.35,
   angle: 0,
 };
 
-// ===== Input =====
-const keys = {};
+// ===== Input =====nconst keys = {};
 window.addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; });
 window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
 let mouse = {x: innerWidth/2, y: innerHeight/2, worldX: player.x, worldY: player.y};
 canvas.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
 canvas.addEventListener('contextmenu', e => e.preventDefault());
-
-// mouse clicks
 canvas.addEventListener('mousedown', e => {
   const w = screenToWorld(e.clientX, e.clientY);
-  const tx = Math.floor(w.x / (CONFIG.baseTileSize));
-  const ty = Math.floor(w.y / (CONFIG.baseTileSize));
-  const pdx = tx - Math.floor(player.x / CONFIG.baseTileSize);
-  const pdy = ty - Math.floor(player.y / CONFIG.baseTileSize);
-  const dist = Math.hypot(pdx, pdy);
+  const tx = Math.floor(w.x / CONFIG.baseTileSize), ty = Math.floor(w.y / CONFIG.baseTileSize);
+  const pdx = tx - Math.floor(player.x / CONFIG.baseTileSize), pdy = ty - Math.floor(player.y / CONFIG.baseTileSize);
+  const dist = Math.hypot(pdx,pdy);
   if(dist > CONFIG.breakPlaceRange) return;
-  if(e.button === 0){ setTile(tx,ty,0); }
-  else if(e.button === 2){ if(getTile(tx,ty) === 0) setTile(tx,ty,2); }
+  if(e.button === 0) setTile(tx,ty,0);
+  else if(e.button === 2) if(getTile(tx,ty)===0) setTile(tx,ty,2);
 });
 
 // ===== Camera =====
 const camera = { x: player.x, y: player.y, zoom: 1, targetZoom: 1 };
-// wheel for zoom (smooth)
-window.addEventListener('wheel', e => {
-  const delta = -e.deltaY * CONFIG.zoomSpeed; // invert so wheel up = zoom in
-  camera.targetZoom = clamp(camera.targetZoom * (1 + delta), CONFIG.minZoom, CONFIG.maxZoom);
-  e.preventDefault();
-},{passive:false});
-
+window.addEventListener('wheel', e => { const delta = -e.deltaY * CONFIG.zoomSpeed; camera.targetZoom = clamp(camera.targetZoom * (1 + delta), CONFIG.minZoom, CONFIG.maxZoom); e.preventDefault(); }, {passive:false});
 function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
-
 function updateCamera(dt){
-  // follow player
-  // simple lerp for smooth camera
-  camera.x += (player.x - camera.x) * clamp(8 * dt, 0, 1);
-  camera.y += (player.y - camera.y) * clamp(8 * dt, 0, 1);
-  // smooth zoom
+  // CENTER camera exactly on player (no lag) — fixes rotation mismatch
+  camera.x = player.x;
+  camera.y = player.y;
+  // smooth zoom only
   camera.zoom += (camera.targetZoom - camera.zoom) * clamp(12 * dt, 0, 1);
 }
 
-// convert between screen and world coordinates, accounting for camera and zoom
 function screenToWorld(sx, sy){
-  // screen origin top-left
-  const cx = canvas.width / (devicePixelRatio || 1) / 2;
-  const cy = canvas.height / (devicePixelRatio || 1) / 2;
+  const dpr = devicePixelRatio || 1;
+  const cssW = canvas.width / dpr, cssH = canvas.height / dpr;
+  const cx = cssW / 2, cy = cssH / 2;
   const worldX = camera.x + (sx - cx) / camera.zoom;
   const worldY = camera.y + (sy - cy) / camera.zoom;
   return {x: worldX, y: worldY};
 }
-function worldToScreen(wx, wy){
-  const cx = canvas.width / (devicePixelRatio || 1) / 2;
-  const cy = canvas.height / (devicePixelRatio || 1) / 2;
-  return { x: cx + (wx - camera.x) * camera.zoom, y: cy + (wy - camera.y) * camera.zoom };
-}
+function worldToScreen(wx, wy){ const dpr = devicePixelRatio || 1; const cssW = canvas.width / dpr, cssH = canvas.height / dpr; const cx = cssW/2, cy = cssH/2; return { x: cx + (wx - camera.x) * camera.zoom, y: cy + (wy - camera.y) * camera.zoom }; }
 
-// ===== Movement & collision =====
-function movePlayer(dx,dy,dt){
-  if(dx === 0 && dy === 0) return;
-  const len = Math.hypot(dx,dy)||1;
-  const speed = CONFIG.playerSpeed;
-  const vx = dx/len * speed * dt;
-  const vy = dy/len * speed * dt;
-  // axis-separate collision
-  if(!collidesAt(player.x + vx, player.y)) player.x += vx; else if(!collidesAt(player.x + Math.sign(vx)*1, player.y)) player.x += Math.sign(vx)*1;
-  if(!collidesAt(player.x, player.y + vy)) player.y += vy; else if(!collidesAt(player.x, player.y + Math.sign(vy)*1)) player.y += Math.sign(vy)*1;
-}
-function collidesAt(px,py){
-  const r = player.radius * 0.85; // slightly smaller for forgiving movement
-  const corners = [
-    {x: px - r, y: py - r},
-    {x: px + r, y: py - r},
-    {x: px - r, y: py + r},
-    {x: px + r, y: py + r},
-  ];
-  for(const c of corners){
-    const tx = Math.floor(c.x / CONFIG.baseTileSize);
-    const ty = Math.floor(c.y / CONFIG.baseTileSize);
-    if(tileSolid(getTile(tx,ty))) return true;
-  }
-  return false;
-}
+// ===== Movement & collision =====nfunction movePlayer(dx,dy,dt){ if(dx===0 && dy===0) return; const len=Math.hypot(dx,dy)||1; const vx=dx/len*CONFIG.playerSpeed*dt; const vy=dy/len*CONFIG.playerSpeed*dt; if(!collidesAt(player.x+vx, player.y)) player.x += vx; if(!collidesAt(player.x, player.y+vy)) player.y += vy; }
+function collidesAt(px,py){ const r = player.radius * 0.9; const corners = [{x:px-r,y:py-r},{x:px+r,y:py-r},{x:px-r,y:py+r},{x:px+r,y:py+r}]; for(const c of corners){ const tx=Math.floor(c.x/CONFIG.baseTileSize), ty=Math.floor(c.y/CONFIG.baseTileSize); if(tileSolid(getTile(tx,ty))) return true; } return false; }
 
-// ===== Rendering =====
-function render(){
-  // clear
-  ctx.save();
-  ctx.setTransform(1,0,0,1,0,0); // reset
-  ctx.clearRect(0,0,canvas.width/(devicePixelRatio||1), canvas.height/(devicePixelRatio||1));
-  // apply camera transform
-  const cx = canvas.width/(devicePixelRatio||1)/2;
-  const cy = canvas.height/(devicePixelRatio||1)/2;
+// ===== Rendering =====nfunction render(){
+  // clear in CSS pixels
+  const dpr = devicePixelRatio || 1;
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.clearRect(0,0,canvas.width/dpr, canvas.height/dpr);
+
+  // camera transform
+  const cssW = canvas.width / dpr, cssH = canvas.height / dpr;
+  const cx = cssW/2, cy = cssH/2;
   ctx.translate(cx, cy);
   ctx.scale(camera.zoom, camera.zoom);
   ctx.translate(-camera.x, -camera.y);
 
-  // compute visible bounds in world coords
-  const halfW = (canvas.width/(devicePixelRatio||1)/2) / camera.zoom;
-  const halfH = (canvas.height/(devicePixelRatio||1)/2) / camera.zoom;
+  // visible tile bounds
+  const halfW = (cssW/2) / camera.zoom, halfH = (cssH/2) / camera.zoom;
   const left = Math.floor((camera.x - halfW) / CONFIG.baseTileSize) - 1;
   const right = Math.ceil((camera.x + halfW) / CONFIG.baseTileSize) + 1;
   const top = Math.floor((camera.y - halfH) / CONFIG.baseTileSize) - 1;
   const bottom = Math.ceil((camera.y + halfH) / CONFIG.baseTileSize) + 1;
 
-  // draw chunks that intersect visible tiles
-  const chunkStartX = Math.floor(left / CONFIG.chunkSize);
-  const chunkEndX = Math.floor(right / CONFIG.chunkSize);
-  const chunkStartY = Math.floor(top / CONFIG.chunkSize);
-  const chunkEndY = Math.floor(bottom / CONFIG.chunkSize);
+  const chunkStartX = Math.floor(left / CONFIG.chunkSize), chunkEndX = Math.floor(right / CONFIG.chunkSize);
+  const chunkStartY = Math.floor(top / CONFIG.chunkSize), chunkEndY = Math.floor(bottom / CONFIG.chunkSize);
 
   for(let cyi = chunkStartY; cyi <= chunkEndY; cyi++){
     for(let cxi = chunkStartX; cxi <= chunkEndX; cxi++){
@@ -322,66 +225,38 @@ function render(){
       const entry = renderChunk(cxi, cyi);
       const sx = cxi * CONFIG.chunkSize * CONFIG.baseTileSize;
       const sy = cyi * CONFIG.chunkSize * CONFIG.baseTileSize;
-      // draw cached chunk canvas scaled by camera.zoom automatically by current transform
       ctx.drawImage(entry.canvas, sx, sy);
     }
   }
 
   // draw player
-  const p = { x: player.x, y: player.y };
-  ctx.save();
-  ctx.translate(p.x, p.y);
-  ctx.rotate(player.angle);
-  ctx.beginPath();
-  ctx.moveTo(player.radius, 0);
-  ctx.lineTo(-player.radius*0.6, -player.radius*0.7);
-  ctx.lineTo(-player.radius*0.6, player.radius*0.7);
-  ctx.closePath();
-  ctx.fillStyle = '#ffdd99'; ctx.fill();
-  ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.stroke();
-  ctx.restore();
+  ctx.save(); ctx.translate(player.x, player.y); ctx.rotate(player.angle);
+  ctx.beginPath(); ctx.moveTo(player.radius,0); ctx.lineTo(-player.radius*0.6,-player.radius*0.7); ctx.lineTo(-player.radius*0.6,player.radius*0.7); ctx.closePath(); ctx.fillStyle='#ffdd99'; ctx.fill(); ctx.strokeStyle='rgba(0,0,0,0.6)'; ctx.stroke(); ctx.restore();
 
-  // HUD (draw in screen space)
+  // HUD in screen space
   ctx.setTransform(1,0,0,1,0,0);
   ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.font = '14px monospace';
   ctx.fillText(`x:${(player.x/CONFIG.baseTileSize).toFixed(2)} y:${(player.y/CONFIG.baseTileSize).toFixed(2)} zoom:${camera.zoom.toFixed(2)}`, 12, 20);
   ctx.fillText('WASD - move   LMB - break   RMB - place dirt   Wheel - zoom', 12, 40);
-
-  ctx.restore();
 }
 
-// ===== Main loop =====
-let last = performance.now();
+// ===== Main loop =====nlet last = performance.now();
 function loop(now){
-  const dt = Math.min((now - last)/1000, 0.05);
-  last = now;
-
+  const dt = Math.min((now - last)/1000, 0.05); last = now;
   // input
-  let dx=0, dy=0;
-  if(keys['w']) dy -= 1; if(keys['s']) dy += 1; if(keys['a']) dx -= 1; if(keys['d']) dx += 1;
+  let dx=0,dy=0; if(keys['w']) dy -= 1; if(keys['s']) dy += 1; if(keys['a']) dx -= 1; if(keys['d']) dx += 1;
   movePlayer(dx,dy,dt);
-
-  // update camera and zoom
+  // camera (centered) and zoom
   updateCamera(dt);
-
-  // update mouse world and player angle
-  const worldMouse = screenToWorld(mouse.x, mouse.y);
-  mouse.worldX = worldMouse.x; mouse.worldY = worldMouse.y;
+  // update mouse world and player angle (camera is centered so no lag)
+  const worldMouse = screenToWorld(mouse.x, mouse.y); mouse.worldX = worldMouse.x; mouse.worldY = worldMouse.y;
   player.angle = Math.atan2(mouse.worldY - player.y, mouse.worldX - player.x);
-
-  render();
-  requestAnimationFrame(loop);
+  render(); requestAnimationFrame(loop);
 }
 
 // ===== Init =====
 generateTerrain();
-// precreate chunk cache entries for only visible area
-// (we'll lazily create as needed in renderChunk)
-
-// ensure immediate response: focus window so keydown works without click
-window.focus();
-requestAnimationFrame(loop);
-
+window.focus(); requestAnimationFrame(loop);
 // expose debug
 window.MinecraftLite = {CONFIG, player, getTile, setTile, map, elevation, moisture, chunkCache};
 </script>
