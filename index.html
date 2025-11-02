@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>2D Top-Down Minecraft-like (simple)</title>
+  <title>2D Top-Down — Biomes & Water (optimized)</title>
   <style>
     html,body{height:100%;margin:0;background:#0b1220;color:#ddd;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
     .wrap{display:flex;align-items:center;justify-content:center;height:100%;}
     canvas{background:#7ec850;box-shadow:0 8px 30px rgba(0,0,0,.5);border-radius:6px}
     .hud{position:fixed;left:12px;top:12px;color:#fff;background:rgba(0,0,0,.25);padding:8px;border-radius:6px;font-size:13px}
-    .hint{opacity:.85}
+    .hint{opacity:.9}
   </style>
 </head>
 <body>
@@ -20,30 +20,164 @@
     <div><strong>Controls</strong></div>
     <div class="hint">WASD / Arrow keys — move</div>
     <div class="hint">Mouse — aim (player rotates to cursor)</div>
-    <div class="hint">Scroll — zoom (optional)</div>
+    <div class="hint">Scroll — zoom</div>
   </div>
 
 <script>
-// 2D top-down, tile-based, simple "Minecraft-like" demo
-// Features:
-// - Large tile map with simple solid tiles
-// - Player moves with WASD / arrow keys
-// - Player rotates to face the cursor (world coords)
-// - Camera follows player with smoothing and a slight zoom-out
-// - Minimal, well-commented single-file implementation
+// Improved version per request:
+// - No walls as borders
+// - Terrain has different shades and biomes (grass variants, dirt, water)
+// - Water acts as non-passable (like an unbreakable wall)
+// - Some micro-optimizations: offscreen tile atlas, visible-tile culling, light GC usage
 
 // -----------------------------------------------------------------------------
 // Config
 const TILE = 32;               // tile pixel size
-const MAP_W = 80;              // map width in tiles
-const MAP_H = 60;              // map height in tiles
-const CANVAS_BASE_W = 1280;    // initial canvas size
+const MAP_W = 120;             // map width in tiles
+const MAP_H = 90;              // map height in tiles
+const CANVAS_BASE_W = 1280;
 const CANVAS_BASE_H = 720;
 
+// Tile types
+const TILE_GRASS = 0;
+const TILE_DIRT  = 1;
+const TILE_WATER = 2;
+
 // -----------------------------------------------------------------------------
-// Utilities
-function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
-function lerp(a,b,t){ return a + (b-a)*t; }
+// Fast seeded noise (value noise) for biomes
+function makeSeededRandom(seed){
+  let s = seed >>> 0;
+  return function(){
+    s = (s + 0x6D2B79F5) | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = (t + Math.imul(t ^ t >>> 7, 61 | t)) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  }
+}
+
+function smoothstep(a){ return a*a*(3-2*a); }
+
+function valueNoise2D(x, y, seed){
+  // integer lattice and smooth interpolation
+  const xf = Math.floor(x), yf = Math.floor(y);
+  const rx = x - xf, ry = y - yf;
+  const u = smoothstep(rx), v = smoothstep(ry);
+  const rnd = makeSeededRandom(((xf*73856093) ^ (yf*19349663) ^ seed) >>> 0);
+  const r00 = rnd();
+  const rnd1 = makeSeededRandom(((xf+1)*73856093) ^ (yf*19349663) ^ seed >>> 0);
+  const r10 = rnd1();
+  const rnd2 = makeSeededRandom(((xf)*73856093) ^ ((yf+1)*19349663) ^ seed >>> 0);
+  const r01 = rnd2();
+  const rnd3 = makeSeededRandom(((xf+1)*73856093) ^ ((yf+1)*19349663) ^ seed >>> 0);
+  const r11 = rnd3();
+  const xa = r00*(1-u) + r10*u;
+  const xb = r01*(1-u) + r11*u;
+  return xa*(1-v) + xb*v;
+}
+
+// A slightly faster multi-octave wrapper
+function octaveNoise(x,y,seed,oct=3,scale=1){
+  let amp = 1, freq = 1, sum = 0, tot=0;
+  for(let i=0;i<oct;i++){
+    sum += valueNoise2D(x*freq/scale, y*freq/scale, seed + i*1000) * amp;
+    tot += amp;
+    amp *= 0.5; freq *= 2;
+  }
+  return sum / tot;
+}
+
+// -----------------------------------------------------------------------------
+// Canvas setup
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+// -----------------------------------------------------------------------------
+// World generation (biomes)
+class World {
+  constructor(w,h){
+    this.w = w; this.h = h;
+    this.tiles = new Uint8Array(w*h);
+    this.seed = Math.floor(Math.random()*999999);
+    this.generate();
+  }
+  idx(x,y){ return y*this.w + x; }
+  getTile(x,y){ if(x<0||y<0||x>=this.w||y>=this.h) return TILE_GRASS; return this.tiles[this.idx(x,y)]; }
+  setTile(x,y,val){ if(x<0||y<0||x>=this.w||y>=this.h) return; this.tiles[this.idx(x,y)] = val; }
+  generate(){
+    // We'll use two noise layers: biome (large scale) and local (small scale)
+    const biomeScale = 50; // larger -> bigger biomes
+    const localScale = 8;
+    const seed = this.seed;
+    for(let y=0;y<this.h;y++){
+      for(let x=0;x<this.w;x++){
+        const b = octaveNoise(x, y, seed, 4, biomeScale); // 0..1
+        const local = octaveNoise(x, y, seed+5000, 3, localScale);
+        // Determine water threshold based on biome value (lower b => more water)
+        const waterThreshold = 0.35 + (b-0.5)*0.25; // tweak so low b -> more water
+        if(local < waterThreshold * 0.9) { this.setTile(x,y, TILE_WATER); continue; }
+        // dirt vs grass: in arid biomes favor dirt
+        const dirtBias = (b > 0.6) ? 0.5 : 0.08 + (0.6-b)*0.6;
+        if(local > 0.75 && Math.random() < dirtBias) { this.setTile(x,y, TILE_DIRT); }
+        else { this.setTile(x,y, TILE_GRASS); }
+      }
+    }
+  }
+  draw(ctx, camera, canvas, atlas){
+    // cull to visible tiles
+    const left = Math.max(0, Math.floor((camera.x - (canvas.width/2)/camera.scale)/TILE) - 1);
+    const right = Math.min(this.w-1, Math.ceil((camera.x + (canvas.width/2)/camera.scale)/TILE) + 1);
+    const top = Math.max(0, Math.floor((camera.y - (canvas.height/2)/camera.scale)/TILE) -1);
+    const bottom = Math.min(this.h-1, Math.ceil((camera.y + (canvas.height/2)/camera.scale)/TILE) +1);
+
+    // draw using tile atlas
+    for(let y=top;y<=bottom;y++){
+      const baseY = y * TILE;
+      for(let x=left;x<=right;x++){
+        const t = this.getTile(x,y);
+        const sx = x * TILE;
+        const sy = baseY;
+        ctx.drawImage(atlas, t*TILE, 0, TILE, TILE, sx, sy, TILE, TILE);
+      }
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Tile atlas creation (offscreen) — multiple shades per tile baked into atlas
+function createTileAtlas(){
+  const off = document.createElement('canvas');
+  off.width = TILE * 3; off.height = TILE;
+  const oc = off.getContext('2d');
+
+  // GRASS: multiple green shades, subtle noise
+  const g = oc.createLinearGradient(0,0,TILE,TILE);
+  g.addColorStop(0, '#6fb23a');
+  g.addColorStop(1, '#4f8b2a');
+  oc.fillStyle = g; oc.fillRect(0,0,TILE,TILE);
+  // small speckles
+  for(let i=0;i<60;i++){ oc.fillStyle = `rgba(0,0,0,${Math.random()*0.06})`; oc.fillRect(Math.random()*TILE, Math.random()*TILE, 1, 1); }
+
+  // DIRT: brown variants
+  const dx = TILE;
+  const dg = oc.createLinearGradient(dx,0,dx+TILE,TILE);
+  dg.addColorStop(0, '#8b5a2b'); dg.addColorStop(1, '#6a3f1a');
+  oc.fillStyle = dg; oc.fillRect(dx,0,TILE,TILE);
+  for(let i=0;i<40;i++){ oc.fillStyle = `rgba(0,0,0,${0.06*Math.random()})`; oc.fillRect(dx + Math.random()*TILE, Math.random()*TILE, 1, 1); }
+
+  // WATER: blue with slight variation and surface gloss
+  const wx = TILE*2;
+  const wg = oc.createLinearGradient(wx,0,wx+TILE,TILE);
+  wg.addColorStop(0, '#3a9adf'); wg.addColorStop(1, '#1f6fa8');
+  oc.fillStyle = wg; oc.fillRect(wx,0,TILE,TILE);
+  // gloss lines
+  oc.globalAlpha = 0.08;
+  for(let i=0;i<3;i++){ oc.fillRect(wx + i*6 + 2, 6 + i*3, TILE-8, 2); }
+  oc.globalAlpha = 1;
+
+  return off;
+}
 
 // -----------------------------------------------------------------------------
 // Input handling
@@ -58,7 +192,7 @@ class Input {
     });
     canvas.addEventListener('wheel', e => {
       e.preventDefault();
-      camera.targetScale = clamp(camera.targetScale * (1 - e.deltaY * 0.0015), 0.6, 1.2);
+      camera.targetScale = clamp(camera.targetScale * (1 - e.deltaY * 0.0015), 0.6, 1.4);
     }, {passive:false});
 
     window.addEventListener('keydown', e => { this.keys[e.key.toLowerCase()] = true; });
@@ -68,23 +202,18 @@ class Input {
 }
 
 // -----------------------------------------------------------------------------
-// Camera — simple follow with smoothing and scale
+// Camera
 class Camera {
-  constructor(x=0,y=0, scale=0.85){
-    this.x = x; this.y = y; // center in world coords
-    this.scale = scale;     // current scale (world -> screen)
-    this.targetScale = scale;
-    this.smooth = 0.12;     // smoothing for position
-    this.zoomSmooth = 0.12;  // smoothing for zoom
+  constructor(x=0,y=0, scale=0.9){
+    this.x = x; this.y = y;
+    this.scale = scale; this.targetScale = scale;
+    this.smooth = 0.14; this.zoomSmooth = 0.14;
   }
   update(dt, targetX, targetY){
-    // gently follow target
     this.x = lerp(this.x, targetX, this.smooth);
     this.y = lerp(this.y, targetY, this.smooth);
-    // smoothly change zoom
     this.scale = lerp(this.scale, this.targetScale, this.zoomSmooth);
   }
-  // Convert mouse screen -> world coordinates
   screenToWorld(sx, sy, canvas){
     const wx = (sx - canvas.width/2)/this.scale + this.x;
     const wy = (sy - canvas.height/2)/this.scale + this.y;
@@ -93,148 +222,61 @@ class Camera {
 }
 
 // -----------------------------------------------------------------------------
-// World / map
-class World {
-  constructor(w,h){
-    this.w = w; this.h = h;
-    this.tiles = new Uint8Array(w*h);
-    this.generate();
-  }
-  idx(x,y){ return y*this.w + x; }
-  getTile(x,y){ if(x<0||y<0||x>=this.w||y>=this.h) return 1; return this.tiles[this.idx(x,y)]; }
-  setTile(x,y,val){ if(x<0||y<0||x>=this.w||y>=this.h) return; this.tiles[this.idx(x,y)] = val; }
-  generate(){
-    // Simple generation: mostly grass (0), scattered dirt/stone (1 solid)
-    for(let y=0;y<this.h;y++){
-      for(let x=0;x<this.w;x++){
-        // border walls
-        if(x===0||y===0||x===this.w-1||y===this.h-1){ this.setTile(x,y,1); continue; }
-        const r = Math.random();
-        if(r < 0.06) this.setTile(x,y,1);
-        else this.setTile(x,y,0);
-      }
-    }
-    // create a few rectangular "mines" and clusters
-    for(let i=0;i<60;i++){
-      const cx = Math.floor(Math.random()*(this.w-8))+4;
-      const cy = Math.floor(Math.random()*(this.h-8))+4;
-      const rw = Math.floor(Math.random()*4)+2;
-      const rh = Math.floor(Math.random()*4)+2;
-      for(let yy=cy-rh; yy<cy+rh; yy++) for(let xx=cx-rw; xx<cx+rw; xx++) if(Math.random()<0.85) this.setTile(xx,yy,1);
-    }
-  }
-  draw(ctx, camera, canvas){
-    // compute visible tile range
-    const left = Math.floor((camera.x - (canvas.width/2)/camera.scale)/TILE) - 1;
-    const right = Math.ceil((camera.x + (canvas.width/2)/camera.scale)/TILE) + 1;
-    const top = Math.floor((camera.y - (canvas.height/2)/camera.scale)/TILE) -1;
-    const bottom = Math.ceil((camera.y + (canvas.height/2)/camera.scale)/TILE) +1;
-
-    for(let y = top; y <= bottom; y++){
-      for(let x = left; x <= right; x++){
-        const tile = this.getTile(x,y);
-        const sx = x * TILE;
-        const sy = y * TILE;
-        if(tile === 0){
-          // grass
-          ctx.fillStyle = '#69b23a';
-          ctx.fillRect(sx, sy, TILE, TILE);
-          // simple noise
-          ctx.fillStyle = 'rgba(0,0,0,0.03)';
-          if((x+y)%7===0) ctx.fillRect(sx+4, sy+4, 2, 2);
-        } else {
-          // solid block (dirt/stone)
-          ctx.fillStyle = '#8b5a2b';
-          ctx.fillRect(sx, sy, TILE, TILE);
-          ctx.strokeStyle = 'rgba(0,0,0,0.12)';
-          ctx.strokeRect(sx+1, sy+1, TILE-2, TILE-2);
-        }
-      }
-    }
-  }
-}
-
-// -----------------------------------------------------------------------------
 // Player
 class Player {
-  constructor(x,y){
-    this.x = x; this.y = y;
-    this.radius = 12;
-    this.speed = 160; // pixels/sec
-    this.angle = 0;    // facing direction
-  }
+  constructor(x,y){ this.x = x; this.y = y; this.radius = 12; this.speed = 170; this.angle = 0; }
   update(dt, input, world, camera, canvas){
-    // Movement vector from input
-    let vx = 0, vy = 0;
-    if(input.isDown('w') || input.isDown('arrowup')) vy -= 1;
-    if(input.isDown('s') || input.isDown('arrowdown')) vy += 1;
-    if(input.isDown('a') || input.isDown('arrowleft')) vx -= 1;
-    if(input.isDown('d') || input.isDown('arrowright')) vx += 1;
-    // normalize
+    let vx=0, vy=0;
+    if(input.isDown('w')||input.isDown('arrowup')) vy -=1;
+    if(input.isDown('s')||input.isDown('arrowdown')) vy +=1;
+    if(input.isDown('a')||input.isDown('arrowleft')) vx -=1;
+    if(input.isDown('d')||input.isDown('arrowright')) vx +=1;
     const mag = Math.hypot(vx,vy);
     if(mag>0){ vx/=mag; vy/=mag; }
-
-    // move with collision against solid tiles
     const nx = this.x + vx * this.speed * dt;
     const ny = this.y + vy * this.speed * dt;
 
-    // collision check function
     const collides = (px,py) => {
       const tx = Math.floor(px / TILE);
       const ty = Math.floor(py / TILE);
-      return world.getTile(tx,ty) === 1;
+      return world.getTile(tx,ty) === TILE_WATER; // water is impassable
     };
 
-    // simple axis separation
     if(!collides(nx, this.y)) this.x = nx;
     if(!collides(this.x, ny)) this.y = ny;
 
-    // compute angle to cursor (mouse in world coords)
     const mw = camera.screenToWorld(input.mouse.x, input.mouse.y, canvas);
     this.angle = Math.atan2(mw.y - this.y, mw.x - this.x);
   }
   draw(ctx){
-    ctx.save();
-    ctx.translate(this.x, this.y);
-    ctx.rotate(this.angle);
-    // draw a simple player: triangle pointing right
-    ctx.beginPath();
-    ctx.moveTo(16, 0);
-    ctx.lineTo(-10, -10);
-    ctx.lineTo(-10, 10);
-    ctx.closePath();
-    ctx.fillStyle = '#2b8cff';
-    ctx.fill();
-    // outline / eye
-    ctx.beginPath(); ctx.arc(6, -3, 2, 0, Math.PI*2); ctx.fillStyle = '#fff'; ctx.fill();
+    ctx.save(); ctx.translate(this.x, this.y); ctx.rotate(this.angle);
+    ctx.beginPath(); ctx.moveTo(14,0); ctx.lineTo(-10,-8); ctx.lineTo(-6,0); ctx.lineTo(-10,8); ctx.closePath(); ctx.fillStyle = '#2b8cff'; ctx.fill();
+    ctx.beginPath(); ctx.arc(4,-2,2,0,Math.PI*2); ctx.fillStyle='#fff'; ctx.fill();
     ctx.restore();
   }
 }
 
 // -----------------------------------------------------------------------------
-// Setup
-const canvas = document.getElementById('game');
-const ctx = canvas.getContext('2d');
-resizeCanvas();
-window.addEventListener('resize', resizeCanvas);
+// Utils
+function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+function lerp(a,b,t){ return a + (b-a)*t; }
 
+// -----------------------------------------------------------------------------
+// Setup world, player, camera, atlas
 const world = new World(MAP_W, MAP_H);
+const atlas = createTileAtlas();
 const player = new Player(MAP_W*TILE/2, MAP_H*TILE/2);
-const camera = new Camera(player.x, player.y, 0.85); // slight zoom out
+const camera = new Camera(player.x, player.y, 0.9);
 const input = new Input(canvas);
 
 let last = performance.now();
 function gameLoop(now){
-  const dt = Math.min((now - last)/1000, 1/15);
+  const dt = Math.min((now-last)/1000, 1/15);
   last = now;
-
   player.update(dt, input, world, camera, canvas);
   camera.update(dt, player.x, player.y);
-
-  // update mouse world coords (convenience)
   const mw = camera.screenToWorld(input.mouse.x, input.mouse.y, canvas);
   input.mouse.worldX = mw.x; input.mouse.worldY = mw.y;
-
   render();
   requestAnimationFrame(gameLoop);
 }
@@ -243,46 +285,28 @@ requestAnimationFrame(gameLoop);
 // -----------------------------------------------------------------------------
 // Rendering
 function render(){
-  // clear
   ctx.setTransform(1,0,0,1,0,0);
   ctx.clearRect(0,0,canvas.width,canvas.height);
-
-  // apply camera transform: scale and center camera.x/camera.y at canvas center
-  ctx.setTransform(camera.scale, 0, 0, camera.scale, canvas.width/2 - camera.x*camera.scale, canvas.height/2 - camera.y*camera.scale);
-
-  // draw world
-  world.draw(ctx, camera, canvas);
-
-  // draw player
+  ctx.setTransform(camera.scale,0,0,camera.scale, canvas.width/2 - camera.x*camera.scale, canvas.height/2 - camera.y*camera.scale);
+  world.draw(ctx, camera, canvas, atlas);
   player.draw(ctx);
-
-  // optional: draw cursor marker in world coords for clarity
-  ctx.save();
-  const mw = {x: input.mouse.worldX, y: input.mouse.worldY};
-  ctx.beginPath(); ctx.arc(mw.x, mw.y, 4, 0, Math.PI*2); ctx.fillStyle='rgba(0,0,0,0.6)'; ctx.fill();
-  ctx.restore();
-
-  // draw simple grid lines (subtle)
-  ctx.save();
-  ctx.globalAlpha = 0.04;
-  ctx.lineWidth = 1;
-  ctx.strokeStyle = '#000';
+  // cursor marker
+  ctx.save(); ctx.beginPath(); ctx.arc(input.mouse.worldX, input.mouse.worldY, 3,0,Math.PI*2); ctx.fillStyle='rgba(0,0,0,0.6)'; ctx.fill(); ctx.restore();
+  // subtle grid (very light) — reduced lines for perf
+  ctx.save(); ctx.globalAlpha = 0.035; ctx.lineWidth = 1; ctx.strokeStyle = '#000';
   const left = Math.floor((camera.x - (canvas.width/2)/camera.scale)/TILE) - 1;
   const right = Math.ceil((camera.x + (canvas.width/2)/camera.scale)/TILE) + 1;
   const top = Math.floor((camera.y - (canvas.height/2)/camera.scale)/TILE) -1;
   const bottom = Math.ceil((camera.y + (canvas.height/2)/camera.scale)/TILE) +1;
-  for(let x = left; x<=right; x++){ ctx.beginPath(); ctx.moveTo(x*TILE, top*TILE); ctx.lineTo(x*TILE, bottom*TILE); ctx.stroke(); }
-  for(let y = top; y<=bottom; y++){ ctx.beginPath(); ctx.moveTo(left*TILE, y*TILE); ctx.lineTo(right*TILE, y*TILE); ctx.stroke(); }
+  for(let x=left; x<=right; x++){ ctx.beginPath(); ctx.moveTo(x*TILE, top*TILE); ctx.lineTo(x*TILE, bottom*TILE); ctx.stroke(); }
+  for(let y=top; y<=bottom; y++){ ctx.beginPath(); ctx.moveTo(left*TILE, y*TILE); ctx.lineTo(right*TILE, y*TILE); ctx.stroke(); }
   ctx.restore();
-
-  // reset transform for HUD or debug
   ctx.setTransform(1,0,0,1,0,0);
 }
 
 // -----------------------------------------------------------------------------
-// Resize logic keeps canvas aspect ratio and pixel ratio in mind
+// Resize logic
 function resizeCanvas(){
-  // make canvas fill most of the window but keep base aspect
   const vw = Math.max(600, Math.min(window.innerWidth - 40, CANVAS_BASE_W));
   const vh = Math.max(360, Math.min(window.innerHeight - 40, CANVAS_BASE_H));
   canvas.width = vw; canvas.height = vh;
