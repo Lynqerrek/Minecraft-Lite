@@ -3,23 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Minecart Lite — Simple Minecraft in Three.js</title>
-  <style>
-    html,body{height:100%;margin:0;background:#6ec0ff}
-    canvas{display:block}
-    #ui{position:fixed;left:10px;top:10px;color:#111;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial;}
-    #instructions{background:rgba(255,255,255,0.9);padding:10px;border-radius:8px;max-width:320px}
-    #hotbar{position:fixed;left:50%;transform:translateX(-50%);bottom:14px;display:flex;gap:8px}
-    .slot{width:46px;height:46px;border-radius:6px;background:rgba(255,255,255,0.9);display:flex;align-items:center;justify-content:center;font-weight:600}
-    #type{font-weight:700}
-  </style>
+  <title>Minecraft Lite — Three.js</title>
 </head>
 <body>
   <div id="ui">
     <div id="instructions">
-      <div><strong>Minecart Lite — Simple Minecraft</strong></div>
-      <div style="margin-top:6px">Click to lock pointer and start. Controls: <strong>WASD</strong> move, <strong>mouse</strong> look, <strong>Space</strong> jump, <strong>Left click</strong> remove block, <strong>Right click</strong> place block, <strong>Scroll</strong> change block type.</div>
-      <div style="margin-top:6px">Blocks: <span id="type">0</span></div>
+      <div><strong>Minecraft Lite — Simple Three.js Demo</strong></div>
+      <div>Click to lock pointer and start. Controls: WASD move, mouse look, Space jump, Left click remove, Right click place, Scroll change block type.</div>
+      <div>Blocks: <span id="type">0</span></div>
     </div>
   </div>
   <div id="hotbar"></div>
@@ -27,6 +18,31 @@
   <script type="module">
     import * as THREE from 'https://unpkg.com/three@0.158.0/build/three.module.js';
     import { PointerLockControls } from 'https://unpkg.com/three@0.158.0/examples/jsm/controls/PointerLockControls.js';
+
+    // Minimal page setup using JS for styling (no <style> block)
+    document.body.style.margin = '0';
+    document.body.style.height = '100vh';
+    document.body.style.background = '#87ceeb';
+
+    const ui = document.getElementById('ui');
+    ui.style.position = 'fixed';
+    ui.style.left = '10px';
+    ui.style.top = '10px';
+    ui.style.fontFamily = 'system-ui,Segoe UI,Roboto,Helvetica,Arial';
+
+    const instr = document.getElementById('instructions');
+    instr.style.background = 'rgba(255,255,255,0.9)';
+    instr.style.padding = '8px';
+    instr.style.borderRadius = '6px';
+    instr.style.maxWidth = '360px';
+
+    const hotbar = document.getElementById('hotbar');
+    hotbar.style.position = 'fixed';
+    hotbar.style.left = '50%';
+    hotbar.style.transform = 'translateX(-50%)';
+    hotbar.style.bottom = '14px';
+    hotbar.style.display = 'flex';
+    hotbar.style.gap = '8px';
 
     // ----- Basic scene setup -----
     const scene = new THREE.Scene();
@@ -54,8 +70,8 @@
     // pointer lock controls
     const controls = new PointerLockControls(camera, document.body);
     document.addEventListener('click', ()=>{ if (!controls.isLocked) controls.lock(); });
-    controls.addEventListener('lock', ()=>{ document.getElementById('instructions').style.display='none' });
-    controls.addEventListener('unlock', ()=>{ document.getElementById('instructions').style.display='block' });
+    controls.addEventListener('lock', ()=>{ instr.style.display='none' });
+    controls.addEventListener('unlock', ()=>{ instr.style.display='block' });
 
     // player state
     const player = {
@@ -70,11 +86,10 @@
 
     // simple world parameters
     const WORLD = { width: 32, depth: 32, height: 10 };
-    // map: flat 3D array [x][y][z], 0 = empty, >0 = block type
     const map = new Uint8Array(WORLD.width * WORLD.height * WORLD.depth);
     function idx(x,y,z){ return x + z*WORLD.width + y*WORLD.width*WORLD.depth; }
 
-    // generate heightmap (simple) and fill blocks
+    // generate heightmap (simple)
     for(let x=0;x<WORLD.width;x++){
       for(let z=0;z<WORLD.depth;z++){
         const h = Math.floor(3 + Math.sin(x*0.3 + z*0.2)*2 + Math.random()*1.6);
@@ -83,15 +98,12 @@
         }
       }
     }
-
-    // small floating platform so you don't fall forever
     map[idx(8,9,8)] = 3;
 
     // block colors
     const BLOCKS = [null, 0x8DB360, 0x8B5A2B, 0x999999, 0xffd27f];
-    // 1=grass,2=dirt,3=stone,4=sand (example)
 
-    // Build mesh with exposed-face culling: create one big BufferGeometry
+    // Build mesh with exposed-face culling
     let worldMesh = null;
     function rebuildWorldMesh(){
       if (worldMesh) { scene.remove(worldMesh); worldMesh.geometry.dispose(); worldMesh.material.dispose(); }
@@ -102,45 +114,28 @@
       const indices = [];
       let vertexCount = 0;
 
-      // helper: push face (quad) with given corner positions and normal and color
       function pushFace(a,b,c,d, normal, color){
         positions.push(...a,...b,...c,...d);
         normals.push(...normal,...normal,...normal,...normal);
         for(let i=0;i<4;i++){ colors.push(color.r,color.g,color.b); }
-        // two triangles
         indices.push(vertexCount, vertexCount+1, vertexCount+2, vertexCount, vertexCount+2, vertexCount+3);
         vertexCount += 4;
       }
 
-      // cube vertex helper (unit cube centered at 0) but we will offset
-      // For each block at (x,y,z) with size 1, we'll create faces only if neighbor empty
       for(let x=0;x<WORLD.width;x++){
         for(let y=0;y<WORLD.height;y++){
           for(let z=0;z<WORLD.depth;z++){
             const t = map[idx(x,y,z)];
             if (!t) continue;
             const c = new THREE.Color(BLOCKS[t] || 0xffffff);
-            const cr = [c.r,c.g,c.b];
             const px = x, py = y, pz = z;
-
-            // check neighbors: +X, -X, +Y, -Y, +Z, -Z
             const nPos = (nx,ny,nz)=> (nx>=0 && nx<WORLD.width && ny>=0 && ny<WORLD.height && nz>=0 && nz<WORLD.depth) ? map[idx(nx,ny,nz)] : 0;
-
-            // face coordinates (each face is a quad 4 verts CCW)
-            // we use unit cubes sized 1 and positioned so block occupies [x,x+1) etc
             const x0 = px, x1 = px+1, y0 = py, y1 = py+1, z0 = pz, z1 = pz+1;
-
-            // -Z face (towards -z)
             if (!nPos(x,y,z-1)) pushFace([x1,y0,z0],[x0,y0,z0],[x0,y1,z0],[x1,y1,z0],[0,0,-1], c);
-            // +Z face
             if (!nPos(x,y,z+1)) pushFace([x0,y0,z1],[x1,y0,z1],[x1,y1,z1],[x0,y1,z1],[0,0,1], c);
-            // -X face
             if (!nPos(x-1,y,z)) pushFace([x0,y0,z1],[x0,y0,z0],[x0,y1,z0],[x0,y1,z1],[-1,0,0], c);
-            // +X face
             if (!nPos(x+1,y,z)) pushFace([x1,y0,z0],[x1,y0,z1],[x1,y1,z1],[x1,y1,z0],[1,0,0], c);
-            // -Y face (bottom)
             if (!nPos(x,y-1,z)) pushFace([x0,y0,z0],[x1,y0,z0],[x1,y0,z1],[x0,y0,z1],[0,-1,0], c);
-            // +Y face (top)
             if (!nPos(x,y+1,z)) pushFace([x0,y1,z1],[x1,y1,z1],[x1,y1,z0],[x0,y1,z0],[0,1,0], c);
           }
         }
@@ -160,145 +155,92 @@
 
     rebuildWorldMesh();
 
-    // Add a crosshair
+    // Add a crosshair (styled via JS)
     const cross = document.createElement('div');
     cross.style.position = 'fixed'; cross.style.left='50%'; cross.style.top='50%'; cross.style.transform='translate(-50%,-50%)';
     cross.style.width='8px'; cross.style.height='8px'; cross.style.borderRadius='50%'; cross.style.background='rgba(0,0,0,0.6)';
     document.body.appendChild(cross);
 
-    // Raycaster for block interaction
     const raycaster = new THREE.Raycaster();
+    let currentType = 1; document.getElementById('type').textContent = currentType;
 
-    // current block type selection
-    let currentType = 1;
-    document.getElementById('type').textContent = currentType;
+    for(let i=1;i<=5;i++){ const s=document.createElement('div'); s.textContent=i; s.style.width='46px'; s.style.height='46px'; s.style.borderRadius='6px'; s.style.display='flex'; s.style.alignItems='center'; s.style.justifyContent='center'; s.style.background='rgba(255,255,255,0.9)'; s.style.fontWeight='600'; hotbar.appendChild(s); }
 
-    // hotbar display
-    const hotbar = document.getElementById('hotbar');
-    for(let i=1;i<=5;i++){
-      const s = document.createElement('div'); s.className='slot'; s.textContent = i; hotbar.appendChild(s);
-    }
-
-    // Input
     const keys = {};
     document.addEventListener('keydown', (e)=>{ keys[e.code]=true; if (e.code==='Space') e.preventDefault(); });
     document.addEventListener('keyup', (e)=>{ keys[e.code]=false; });
     window.addEventListener('wheel', (e)=>{ if (e.deltaY>0) currentType = Math.min(currentType+1, BLOCKS.length-1); else currentType = Math.max(1,currentType-1); document.getElementById('type').textContent = currentType; });
 
-    // Mouse buttons: left=0 remove, right=2 place
     window.addEventListener('contextmenu', (e)=>e.preventDefault());
-    window.addEventListener('mousedown', (e)=>{
-      if (!controls.isLocked) return;
-      if (e.button===0) interactBlock('remove');
-      if (e.button===2) interactBlock('place');
-    });
+    window.addEventListener('mousedown', (e)=>{ if (!controls.isLocked) return; if (e.button===0) interactBlock('remove'); if (e.button===2) interactBlock('place'); });
 
     function interactBlock(mode){
       raycaster.setFromCamera({x:0,y:0}, camera);
       const intersects = raycaster.intersectObject(worldMesh, true);
       if (!intersects.length) return;
       const it = intersects[0];
-      // compute block position from point and face normal
       const point = it.point;
       const normal = it.face.normal;
-      // Convert to block coordinates
       const bx = Math.floor(point.x + (normal.x>0 ? 0.5 : -0.5));
       const by = Math.floor(point.y + (normal.y>0 ? 0.5 : -0.5));
       const bz = Math.floor(point.z + (normal.z>0 ? 0.5 : -0.5));
 
       if (mode==='remove'){
-        if (within(bx,by,bz)){
-          map[idx(bx,by,bz)] = 0; rebuildWorldMesh();
-        }
+        if (within(bx,by,bz)){ map[idx(bx,by,bz)] = 0; rebuildWorldMesh(); }
       } else {
-        // place adjacent in direction of normal
         const px = bx + (normal.x>0 ? 1 : (normal.x<0 ? -1:0));
         const py = by + (normal.y>0 ? 1 : (normal.y<0 ? -1:0));
         const pz = bz + (normal.z>0 ? 1 : (normal.z<0 ? -1:0));
-        if (within(px,py,pz)){
-          map[idx(px,py,pz)] = currentType;
-          rebuildWorldMesh();
-        }
+        if (within(px,py,pz)){ map[idx(px,py,pz)] = currentType; rebuildWorldMesh(); }
       }
     }
 
     function within(x,y,z){ return x>=0 && x<WORLD.width && y>=0 && y<WORLD.height && z>=0 && z<WORLD.depth; }
 
-    // Simple collision: test AABB of player at new position
     function collidesAt(pos){
       const footY = pos.y - 0.1;
-      const feetX = Math.floor(pos.x);
       const feetY = Math.floor(footY);
-      const feetZ = Math.floor(pos.z);
-      // check up to player's height
       for(let y=feetY; y<=Math.floor(pos.y + player.height); y++){
         const x0 = Math.floor(pos.x - 0.25);
         const x1 = Math.floor(pos.x + 0.25);
         const z0 = Math.floor(pos.z - 0.25);
         const z1 = Math.floor(pos.z + 0.25);
-        for(let x=x0;x<=x1;x++) for(let z=z0;z<=z1;z++){
-          if (!within(x,y,z)) continue;
-          if (map[idx(x,y,z)]) return true;
-        }
+        for(let x=x0;x<=x1;x++) for(let z=z0;z<=z1;z++){ if (!within(x,y,z)) continue; if (map[idx(x,y,z)]) return true; }
       }
       return false;
     }
 
-    // put player at starting position
     controls.getObject().position.copy(player.position);
     camera.position.set(0,0,0);
 
-    // animate
     const clock = new THREE.Clock();
     function animate(){
       const dt = Math.min(0.05, clock.getDelta());
-
-      // movement input
       const forward = (keys['KeyW']?1:0) - (keys['KeyS']?1:0);
       const strafe = (keys['KeyD']?1:0) - (keys['KeyA']?1:0);
-
-      // calculate direction in world space
       player.direction.set(0,0,0);
       if (forward) player.direction.z = forward;
       if (strafe) player.direction.x = strafe;
       if (player.direction.lengthSq()>0) player.direction.normalize();
-
-      // yaw from controls
       const euler = new THREE.Euler(0, controls.getObject().rotation.y, 0, 'YXZ');
       const move = player.direction.clone().applyEuler(euler).multiplyScalar(player.speed * dt);
-
-      // gravity
       player.velocity.y -= 9.8 * dt;
-
-      // attempted new position
       const prevPos = controls.getObject().position.clone();
       controls.getObject().position.add(move);
       controls.getObject().position.y += player.velocity.y * dt;
-
-      // simple ground collision detection
       if (collidesAt(controls.getObject().position)){
-        // rollback XZ
         controls.getObject().position.copy(prevPos);
         player.velocity.y = 0;
         player.onGround = true;
-      } else {
-        player.onGround = false;
-      }
-
-      // jump
+      } else { player.onGround = false; }
       if (keys['Space'] && player.onGround){ player.velocity.y = player.jumpSpeed; player.onGround=false; }
-
-      // keep camera height relative to player
-      // camera is attached to pointerlock controls object (which is used as player object)
-
       renderer.render(scene, camera);
       requestAnimationFrame(animate);
     }
 
     animate();
 
-    // Helpful note: some browsers will block module imports when opening file:// directly.
-    // Run a small local http server (e.g. `python -m http.server`) and open http://localhost:8000/simple-minecraft-threejs.html
+    // Note: run via local http server to avoid module import issues with file://
 
   </script>
 </body>
