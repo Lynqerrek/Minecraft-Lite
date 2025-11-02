@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>MineLite — Improved Movement, Collisions, Face Culling, Chunking</title>
+  <title>MineLite — Fixed: Chunk key + error overlay</title>
   <style>
     html,body{height:100%;margin:0;background:#7ec0ff;overflow:hidden;font-family:Inter,Arial,Helvetica,sans-serif}
     canvas{display:block}
@@ -13,32 +13,30 @@
     .slot{width:40px;height:40px;border-radius:6px;background:rgba(0,0,0,0.06);display:flex;align-items:center;justify-content:center;font-weight:700}
     #fps{position:fixed;right:12px;top:12px;background:rgba(255,255,255,0.9);padding:8px;border-radius:6px}
     #loading{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);background:#fff;padding:12px;border-radius:8px;box-shadow:0 6px 30px rgba(0,0,0,0.2)}
+    #errorOverlay{position:fixed;left:12px;right:12px;bottom:12px;background:#ffefef;border:1px solid #ff9b9b;padding:10px;border-radius:8px;color:#600;display:none;white-space:pre-wrap}
   </style>
 </head>
 <body>
   <div id="loading">Generating improved world — please wait...</div>
   <div id="instructions">
-    <b>MineLite — improved</b>
+    <b>MineLite — fixed</b>
     <div>WASD move • Shift to sprint • Space jump • Click break • Right-click place • Scroll change block</div>
     <div style="margin-top:6px;font-size:13px;color:#444">Click the canvas to lock cursor and play (pointer lock).</div>
     <div id="hotbar"></div>
   </div>
   <div id="fps">FPS: <span id="fpsVal">0</span></div>
+  <div id="errorOverlay" role="alert"></div>
 
   <script src="https://unpkg.com/three@0.154.0/build/three.min.js"></script>
   <script>
+  try {
   // ---------------------------
-  // MineLite — improved single-file demo
-  // - chunked geometry (face culling per-block faces)
-  // - frustum culling via per-chunk meshes
-  // - Minecraft-like movement & AABB collisions
-  // - improved terrain generation
-  // Notes: compact but pragmatic. Extend as needed.
+  // MineLite — improved single-file demo (fixed chunkKey bug + error overlay)
   // ---------------------------
 
   // CONFIG
-  const WORLD = { x: 96, z: 96, y: 48 }; // increase world area
-  const CHUNK_SIZE = 16; // chunk size on X,Z
+  const WORLD = { x: 96, z: 96, y: 48 };
+  const CHUNK_SIZE = 16;
   const SEED = 1337;
   const BLOCK_TYPES = [
     { id:0, name:'air', color:0x000000 },
@@ -50,23 +48,13 @@
   ];
   let selectedBlock = 1;
 
-  // Player constants
-  const PLAYER = {
-    height: 1.8,
-    eye: 1.62,
-    radius: 0.3,
-    speed: 4.3,
-    sprintMultiplier: 1.6
-  };
+  const PLAYER = { height:1.8, eye:1.62, radius:0.3, speed:4.3, sprintMultiplier:1.6 };
 
-  // utilities
-  function idx(x,y,z){return x + z*WORLD.x + y*WORLD.x*WORLD.z}
-  function inBounds(x,y,z){return x>=0&&y>=0&&z>=0&&x<WORLD.x&&y<WORLD.y&&z<WORLD.z}
+  function idx(x,y,z){ return x + z*WORLD.x + y*WORLD.x*WORLD.z }
+  function inBounds(x,y,z){ return x>=0 && y>=0 && z>=0 && x<WORLD.x && y<WORLD.y && z<WORLD.z }
 
-  // WORLD STORAGE
   const world = new Uint8Array(WORLD.x * WORLD.y * WORLD.z);
 
-  // seeded RNG and Perlin noise (simple but multi-octave)
   function RNG(seed){ let s = seed; return ()=>{ s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; } }
   function buildPerlin(seed){
     const perm = new Uint8Array(512);
@@ -91,7 +79,6 @@
     }
   }
 
-  // generate terrain with multiple octaves and clear lakes
   function generateTerrain(){
     const noise = buildPerlin(SEED);
     for(let x=0;x<WORLD.x;x++){
@@ -102,22 +89,19 @@
         e += 0.50 * noise(nx*2.0, nz*2.0);
         e += 0.25 * noise(nx*4.0, nz*4.0);
         e /= 1.75;
-        const height = Math.floor((e + 1) * 6) + 6; // tuned
+        const height = Math.floor((e + 1) * 6) + 6;
         for(let y=0;y<WORLD.y;y++){
           let id = 0;
           if(y <= height - 1){
-            if(y === height - 1) id = 1; // grass
-            else if(y > height - 5) id = 2; // dirt
-            else id = 3; // stone
+            if(y === height - 1) id = 1;
+            else if(y > height - 5) id = 2;
+            else id = 3;
           }
           world[idx(x,y,z)] = id;
         }
-        // small chance for trees on flat-ish ground
         if(Math.random() < 0.03 && height > 8 && height < WORLD.y - 5){
           const top = height;
-          // trunk
           for(let t=top; t<top+4; t++) setBlock(x,t,z,4);
-          // leaves cube
           for(let lx=-2; lx<=2; lx++) for(let lz=-2; lz<=2; lz++) for(let ly=0; ly<=2; ly++){
             const ax = x+lx, az = z+lz, ay = top+ly+1;
             if(inBounds(ax,ay,az) && Math.abs(lx)+Math.abs(lz)+ly<5) setBlock(ax,ay,az,5);
@@ -125,22 +109,18 @@
         }
       }
     }
-    // simple water filling for low areas could be added
   }
 
   function getBlock(x,y,z){ if(!inBounds(x,y,z)) return 0; return world[idx(x,y,z)]; }
   function setBlock(x,y,z,id){ if(!inBounds(x,y,z)) return; world[idx(x,y,z)] = id; }
 
-  // CHUNKS and GEOMETRY
-  const CHUNKS = {}; // key 'cx:cz' -> {mesh, needsUpdate}
+  // chunkKey helper (FIX: was missing)
+  function chunkKey(cx,cz){ return cx+":"+cz }
 
-  // face definitions (each face is two triangles, 4 vertices)
+  const CHUNKS = {};
+
   const FACES = {
-    px: { // +X
-      dir:[1,0,0],
-      verts:[ [1,0,0],[1,1,0],[1,1,1],[1,0,1] ],
-      normal:[1,0,0]
-    },
+    px: { dir:[1,0,0], verts:[ [1,0,0],[1,1,0],[1,1,1],[1,0,1] ], normal:[1,0,0] },
     nx: { dir:[-1,0,0], verts:[ [0,0,1],[0,1,1],[0,1,0],[0,0,0] ], normal:[-1,0,0] },
     py: { dir:[0,1,0], verts:[ [0,1,1],[1,1,1],[1,1,0],[0,1,0] ], normal:[0,1,0] },
     ny: { dir:[0,-1,0], verts:[ [0,0,0],[1,0,0],[1,0,1],[0,0,1] ], normal:[0,-1,0] },
@@ -148,29 +128,22 @@
     nz: { dir:[0,0,-1], verts:[ [1,0,0],[0,0,0],[0,1,0],[1,1,0] ], normal:[0,0,-1] }
   };
 
-  // Build chunk geometry: only add faces where neighbor is air
   function buildChunk(cx, cz){
     const minX = cx*CHUNK_SIZE, minZ = cz*CHUNK_SIZE;
     const maxX = Math.min(minX+CHUNK_SIZE, WORLD.x), maxZ = Math.min(minZ+CHUNK_SIZE, WORLD.z);
-    const positions = [];
-    const normals = [];
-    const colors = [];
-    const indices = [];
+    const positions = [], normals = [], colors = [], indices = [];
     let idxCounter = 0;
-
     for(let x=minX;x<maxX;x++){
       for(let z=minZ; z<maxZ; z++){
         for(let y=0;y<WORLD.y;y++){
           const b = getBlock(x,y,z);
           if(b===0) continue;
-          // for each face
           for(const fName in FACES){
             const f = FACES[fName];
             const nx = x + f.dir[0], ny = y + f.dir[1], nz = z + f.dir[2];
-            const neighbor = inBounds(nx,ny,nz) ? getBlock(nx,ny,nz) : 0; // outside = air
-            if(neighbor !== 0) continue; // face hidden
+            const neighbor = inBounds(nx,ny,nz) ? getBlock(nx,ny,nz) : 0;
+            if(neighbor !== 0) continue;
             const baseX = x - WORLD.x/2, baseY = y, baseZ = z - WORLD.z/2;
-            // push 4 verts
             for(let vi=0; vi<4; vi++){
               const v = f.verts[vi];
               positions.push(baseX + v[0], baseY + v[1], baseZ + v[2]);
@@ -178,14 +151,19 @@
               const col = new THREE.Color(BLOCK_TYPES[b].color);
               colors.push(col.r, col.g, col.b);
             }
-            // two triangles
             indices.push(idxCounter, idxCounter+1, idxCounter+2, idxCounter, idxCounter+2, idxCounter+3);
             idxCounter += 4;
           }
         }
       }
     }
-
+    if(positions.length === 0){
+      // empty chunk -> return a tiny invisible mesh to keep CHUNKS consistent
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute([0,0,0],3));
+      const mat = new THREE.MeshBasicMaterial({visible:false});
+      return new THREE.Mesh(geo, mat);
+    }
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
     geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
@@ -193,26 +171,19 @@
     geometry.setIndex(indices);
     geometry.computeBoundingSphere();
     geometry.computeBoundingBox();
-
     const material = new THREE.MeshStandardMaterial({vertexColors:true});
     const mesh = new THREE.Mesh(geometry, material);
     mesh.frustumCulled = true;
     mesh.castShadow = false;
     mesh.receiveShadow = true;
-
     return mesh;
   }
 
-  function chunkKey(cx,cz){return cx+":"+cz}
-
-  function buildAllChunks(){
-    // dispose old
-    for(const key in CHUNKS){
-      const c = CHUNKS[key];
-      if(c.mesh){ scene.remove(c.mesh); c.mesh.geometry.dispose(); c.mesh.material.dispose(); }
-    }
-    for(let cx=0; cx<Math.ceil(WORLD.x/CHUNK_SIZE); cx++){
-      for(let cz=0; cz<Math.ceil(WORLD.z/CHUNK_SIZE); cz++){
+  function buildAllChunks(scene){
+    for(const key in CHUNKS){ const c = CHUNKS[key]; if(c.mesh){ scene.remove(c.mesh); try{ c.mesh.geometry.dispose(); c.mesh.material.dispose(); }catch(e){} } }
+    const cxCount = Math.ceil(WORLD.x/CHUNK_SIZE), czCount = Math.ceil(WORLD.z/CHUNK_SIZE);
+    for(let cx=0; cx<cxCount; cx++){
+      for(let cz=0; cz<czCount; cz++){
         const mesh = buildChunk(cx,cz);
         scene.add(mesh);
         CHUNKS[chunkKey(cx,cz)] = {mesh, cx, cz};
@@ -220,7 +191,7 @@
     }
   }
 
-  // INITIALIZE WORLD
+  // generate world
   generateTerrain();
 
   // Three.js scene
@@ -230,116 +201,43 @@
   const renderer = new THREE.WebGLRenderer({antialias:true});
   renderer.setSize(innerWidth, innerHeight);
   document.body.appendChild(renderer.domElement);
-
-  // lighting
   scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 0.9));
-  const dir = new THREE.DirectionalLight(0xffffff, 0.7);
-  dir.position.set(-5,10,-5);
-  scene.add(dir);
+  const dir = new THREE.DirectionalLight(0xffffff, 0.7); dir.position.set(-5,10,-5); scene.add(dir);
 
   // Build chunks
-  buildAllChunks();
+  buildAllChunks(scene);
 
-  // Crosshair
-  const cross = document.createElement('div');
-  cross.style.position='fixed'; cross.style.left='50%'; cross.style.top='50%'; cross.style.transform='translate(-50%,-50%)';
-  cross.style.width='6px'; cross.style.height='6px'; cross.style.borderRadius='50%'; cross.style.background='rgba(0,0,0,0.6)';
-  document.body.appendChild(cross);
+  // crosshair
+  const cross = document.createElement('div'); cross.style.position='fixed'; cross.style.left='50%'; cross.style.top='50%'; cross.style.transform='translate(-50%,-50%)'; cross.style.width='6px'; cross.style.height='6px'; cross.style.borderRadius='50%'; cross.style.background='rgba(0,0,0,0.6)'; document.body.appendChild(cross);
 
-  // Player state
-  const playerPos = new THREE.Vector3(WORLD.x/2 - WORLD.x/2, 20, WORLD.z/2 - WORLD.z/2); // start near center (0,20,0)
-  playerPos.set(0, 20, 0);
+  // player
+  const playerPos = new THREE.Vector3(0, 20, 0);
   const velocity = new THREE.Vector3();
   let canJump = false;
-
-  // attach camera to player
   function updateCamera(){ camera.position.set(playerPos.x, playerPos.y + PLAYER.eye, playerPos.z); }
   updateCamera();
 
-  // movement controls
-  const keys = {forward:0, back:0, left:0, right:0};
-  let isSprinting = false;
-  window.addEventListener('keydown', (e)=>{
-    if(e.code==='KeyW') keys.forward=1;
-    if(e.code==='KeyS') keys.back=1;
-    if(e.code==='KeyA') keys.left=1;
-    if(e.code==='KeyD') keys.right=1;
-    if(e.code==='ShiftLeft' || e.code==='ShiftRight') isSprinting = true;
-    if(e.code==='Space'){ if(canJump){ velocity.y = 7; canJump=false; } }
-  });
-  window.addEventListener('keyup', (e)=>{
-    if(e.code==='KeyW') keys.forward=0;
-    if(e.code==='KeyS') keys.back=0;
-    if(e.code==='KeyA') keys.left=0;
-    if(e.code==='KeyD') keys.right=0;
-    if(e.code==='ShiftLeft' || e.code==='ShiftRight') isSprinting = false;
-  });
+  const keys = {forward:0, back:0, left:0, right:0}; let isSprinting=false;
+  window.addEventListener('keydown', (e)=>{ if(e.code==='KeyW') keys.forward=1; if(e.code==='KeyS') keys.back=1; if(e.code==='KeyA') keys.left=1; if(e.code==='KeyD') keys.right=1; if(e.code==='ShiftLeft'||e.code==='ShiftRight') isSprinting=true; if(e.code==='Space'){ if(canJump){ velocity.y = 7; canJump=false; } } });
+  window.addEventListener('keyup', (e)=>{ if(e.code==='KeyW') keys.forward=0; if(e.code==='KeyS') keys.back=0; if(e.code==='KeyA') keys.left=0; if(e.code==='KeyD') keys.right=0; if(e.code==='ShiftLeft'||e.code==='ShiftRight') isSprinting=false; });
 
-  // pointer lock mouse look
-  const yaw = new THREE.Object3D();
-  const pitch = new THREE.Object3D();
-  yaw.add(pitch);
-  pitch.add(camera);
-  scene.add(yaw);
-  yaw.position.copy(playerPos);
-
+  const yaw = new THREE.Object3D(); const pitch = new THREE.Object3D(); yaw.add(pitch); pitch.add(camera); scene.add(yaw); yaw.position.copy(playerPos);
   renderer.domElement.addEventListener('click', ()=>{ renderer.domElement.requestPointerLock?.(); });
-  document.addEventListener('pointermove', (e)=>{
-    if(document.pointerLockElement !== renderer.domElement) return;
-    yaw.rotation.y -= e.movementX * 0.0025;
-    pitch.rotation.x -= e.movementY * 0.0025;
-    pitch.rotation.x = Math.max(-Math.PI/2, Math.min(Math.PI/2, pitch.rotation.x));
-  });
+  document.addEventListener('pointermove', (e)=>{ if(document.pointerLockElement !== renderer.domElement) return; yaw.rotation.y -= e.movementX * 0.0025; pitch.rotation.x -= e.movementY * 0.0025; pitch.rotation.x = Math.max(-Math.PI/2, Math.min(Math.PI/2, pitch.rotation.x)); });
 
-  // raycast interactions (simple stepping through ray)
   const raycaster = new THREE.Raycaster(); raycaster.far = 6;
-  function getTarget(){
-    raycaster.setFromCamera(new THREE.Vector2(0,0), camera);
-    const origin = camera.position.clone();
-    const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
-    const step = 0.2; const maxSteps = Math.floor(raycaster.far/step);
-    let lastEmpty = null;
-    for(let i=0;i<maxSteps;i++){
-      const p = origin.clone().addScaledVector(dir, i*step);
-      const gx = Math.floor(p.x + WORLD.x/2);
-      const gy = Math.floor(p.y);
-      const gz = Math.floor(p.z + WORLD.z/2);
-      if(!inBounds(gx,gy,gz)) continue;
-      const b = getBlock(gx,gy,gz);
-      if(b!==0) return {hit:true, pos:[gx,gy,gz], placePos:lastEmpty};
-      lastEmpty = [gx,gy,gz];
-    }
-    return {hit:false, pos:null, placePos:lastEmpty};
-  }
+  function getTarget(){ raycaster.setFromCamera(new THREE.Vector2(0,0), camera); const origin = camera.position.clone(); const dir = new THREE.Vector3(); camera.getWorldDirection(dir); const step = 0.2; const maxSteps = Math.floor(raycaster.far/step); let lastEmpty = null; for(let i=0;i<maxSteps;i++){ const p = origin.clone().addScaledVector(dir, i*step); const gx = Math.floor(p.x + WORLD.x/2); const gy = Math.floor(p.y); const gz = Math.floor(p.z + WORLD.z/2); if(!inBounds(gx,gy,gz)) continue; const b = getBlock(gx,gy,gz); if(b!==0) return {hit:true, pos:[gx,gy,gz], placePos:lastEmpty}; lastEmpty = [gx,gy,gz]; } return {hit:false, pos:null, placePos:lastEmpty}; }
 
-  window.addEventListener('mousedown', (e)=>{
-    if(document.pointerLockElement !== renderer.domElement) return;
-    const t = getTarget();
-    if(e.button===0){ if(t.hit){ setBlock(...t.pos, 0); rebuildChunkAtPos(t.pos[0], t.pos[2]); } }
-    if(e.button===2){ if(t.placePos){ setBlock(...t.placePos, selectedBlock); rebuildChunkAtPos(t.placePos[0], t.placePos[2]); } }
-  });
+  window.addEventListener('mousedown', (e)=>{ if(document.pointerLockElement !== renderer.domElement) return; const t = getTarget(); if(e.button===0){ if(t.hit){ setBlock(...t.pos, 0); rebuildChunkAtPos(t.pos[0], t.pos[2]); } } if(e.button===2){ if(t.placePos){ setBlock(...t.placePos, selectedBlock); rebuildChunkAtPos(t.placePos[0], t.placePos[2]); } } });
   window.addEventListener('contextmenu', e=>e.preventDefault());
 
-  // HOTBAR
-  const hotbar = document.getElementById('hotbar');
-  function buildHotbar(){ while(hotbar.firstChild) hotbar.removeChild(hotbar.firstChild);
-    for(let i=1;i<BLOCK_TYPES.length;i++){ const s=document.createElement('div'); s.className='slot'; s.textContent=BLOCK_TYPES[i].name[0].toUpperCase(); s.title=BLOCK_TYPES[i].name; s.onclick=()=>{ selectedBlock = BLOCK_TYPES[i].id; updateHotbar(); } hotbar.appendChild(s); }
-    updateHotbar(); }
-  function updateHotbar(){ Array.from(hotbar.children).forEach((c,idx)=>{ const id=idx+1; c.style.outline = (selectedBlock===id)?'3px solid rgba(0,0,0,0.6)':'none'; }); }
-  buildHotbar();
-  window.addEventListener('wheel', (e)=>{ if(e.deltaY>0) selectedBlock = Math.min(selectedBlock+1, BLOCK_TYPES.length-1); else selectedBlock = Math.max(1, selectedBlock-1); updateHotbar(); }, {passive:true});
+  const hotbar = document.getElementById('hotbar'); function buildHotbar(){ while(hotbar.firstChild) hotbar.removeChild(hotbar.firstChild); for(let i=1;i<BLOCK_TYPES.length;i++){ const s=document.createElement('div'); s.className='slot'; s.textContent=BLOCK_TYPES[i].name[0].toUpperCase(); s.title=BLOCK_TYPES[i].name; s.onclick=()=>{ selectedBlock = BLOCK_TYPES[i].id; updateHotbar(); } hotbar.appendChild(s); } updateHotbar(); } function updateHotbar(){ Array.from(hotbar.children).forEach((c,idx)=>{ const id=idx+1; c.style.outline = (selectedBlock===id)?'3px solid rgba(0,0,0,0.6)':'none'; }); } buildHotbar(); window.addEventListener('wheel', (e)=>{ if(e.deltaY>0) selectedBlock = Math.min(selectedBlock+1, BLOCK_TYPES.length-1); else selectedBlock = Math.max(1, selectedBlock-1); updateHotbar(); }, {passive:true});
 
-  // CHUNK REBUILD when blocks changed
-  function rebuildChunkAtPos(x,z){ const cx = Math.floor(x/CHUNK_SIZE), cz = Math.floor(z/CHUNK_SIZE); const key = chunkKey(cx,cz); const old = CHUNKS[key]; if(old && old.mesh){ scene.remove(old.mesh); old.mesh.geometry.dispose(); old.mesh.material.dispose(); }
-    const mesh = buildChunk(cx,cz); scene.add(mesh); CHUNKS[key] = {mesh, cx, cz};
-  }
+  function rebuildChunkAtPos(x,z){ const cx = Math.floor(x/CHUNK_SIZE), cz = Math.floor(z/CHUNK_SIZE); const key = chunkKey(cx,cz); const old = CHUNKS[key]; if(old && old.mesh){ scene.remove(old.mesh); try{ old.mesh.geometry.dispose(); old.mesh.material.dispose(); }catch(e){} } const mesh = buildChunk(cx,cz); scene.add(mesh); CHUNKS[key] = {mesh, cx, cz}; }
 
-  // COLLISION: AABB world vs blocks
   function isSolidBlock(x,y,z){ return inBounds(x,y,z) && getBlock(x,y,z) !== 0; }
 
   function movePlayer(deltaX, deltaY, deltaZ){
-    // move per-axis and resolve collisions to nearest non-colliding position
-    // helper to compute overlapping blocks for a given bbox
     function getOverlappingBlocks(minX, minY, minZ, maxX, maxY, maxZ){
       const bx0 = Math.floor(minX), bx1 = Math.floor(maxX);
       const by0 = Math.floor(minY), by1 = Math.floor(maxY);
@@ -351,7 +249,6 @@
       return hits;
     }
 
-    // attempt X
     if(deltaX !== 0){
       const minX = playerPos.x - PLAYER.radius + Math.min(0,deltaX);
       const maxX = playerPos.x + PLAYER.radius + Math.max(0,deltaX);
@@ -361,20 +258,10 @@
       const maxZ = playerPos.z + PLAYER.radius;
       const hits = getOverlappingBlocks(minX, minY, minZ, maxX, maxY, maxZ);
       let adj = deltaX;
-      for(const h of hits){
-        const bx = h[0];
-        if(deltaX > 0){ // moving +X, block at bx intersects; set adj to min(adj, bx - (playerPos.x + PLAYER.radius))
-          const pen = bx - (playerPos.x + PLAYER.radius);
-          if(pen < adj) adj = Math.min(adj, pen);
-        } else { // moving -X
-          const pen = (bx + 1) - (playerPos.x - PLAYER.radius);
-          if(pen > adj) adj = Math.max(adj, pen);
-        }
-      }
+      for(const h of hits){ const bx = h[0]; if(deltaX > 0){ const pen = bx - (playerPos.x + PLAYER.radius); if(pen < adj) adj = Math.min(adj, pen); } else { const pen = (bx + 1) - (playerPos.x - PLAYER.radius); if(pen > adj) adj = Math.max(adj, pen); } }
       playerPos.x += adj;
     }
 
-    // attempt Z
     if(deltaZ !== 0){
       const minX = playerPos.x - PLAYER.radius;
       const maxX = playerPos.x + PLAYER.radius;
@@ -384,15 +271,10 @@
       const maxZ = playerPos.z + PLAYER.radius + Math.max(0,deltaZ);
       const hits = getOverlappingBlocks(minX, minY, minZ, maxX, maxY, maxZ);
       let adj = deltaZ;
-      for(const h of hits){
-        const bz = h[2];
-        if(deltaZ > 0){ const pen = bz - (playerPos.z + PLAYER.radius); if(pen < adj) adj = Math.min(adj, pen); }
-        else { const pen = (bz + 1) - (playerPos.z - PLAYER.radius); if(pen > adj) adj = Math.max(adj, pen); }
-      }
+      for(const h of hits){ const bz = h[2]; if(deltaZ > 0){ const pen = bz - (playerPos.z + PLAYER.radius); if(pen < adj) adj = Math.min(adj, pen); } else { const pen = (bz + 1) - (playerPos.z - PLAYER.radius); if(pen > adj) adj = Math.max(adj, pen); } }
       playerPos.z += adj;
     }
 
-    // attempt Y
     if(deltaY !== 0){
       const minX = playerPos.x - PLAYER.radius;
       const maxX = playerPos.x + PLAYER.radius;
@@ -402,19 +284,13 @@
       const maxY = playerPos.y + PLAYER.height + Math.max(0,deltaY) - 1e-6;
       const hits = getOverlappingBlocks(minX, minY, minZ, maxX, maxY, maxZ);
       let adj = deltaY;
-      for(const h of hits){
-        const by = h[1];
-        if(deltaY > 0){ const pen = by - (playerPos.y + PLAYER.height); if(pen < adj) adj = Math.min(adj, pen); }
-        else { const pen = (by + 1) - playerPos.y; if(pen > adj) adj = Math.max(adj, pen); }
-      }
+      for(const h of hits){ const by = h[1]; if(deltaY > 0){ const pen = by - (playerPos.y + PLAYER.height); if(pen < adj) adj = Math.min(adj, pen); } else { const pen = (by + 1) - playerPos.y; if(pen > adj) adj = Math.max(adj, pen); } }
       playerPos.y += adj;
-      // if we moved down and adj was limited -> standing on ground
       if(deltaY < 0 && Math.abs(adj - deltaY) > 1e-5) canJump = true;
-      if(deltaY > 0 && Math.abs(adj - deltaY) > 1e-5) velocity.y = 0; // hit ceiling
+      if(deltaY > 0 && Math.abs(adj - deltaY) > 1e-5) velocity.y = 0;
     }
   }
 
-  // check if player standing on ground
   function checkOnGround(){
     const minX = playerPos.x - PLAYER.radius;
     const maxX = playerPos.x + PLAYER.radius;
@@ -428,82 +304,42 @@
     return false;
   }
 
-  // animation loop
-  let prevTime = performance.now();
-  const fpsEl = document.getElementById('fpsVal'); let fpsCount=0, fpsLast=performance.now();
+  let prevTime = performance.now(); const fpsEl = document.getElementById('fpsVal'); let fpsCount=0, fpsLast=performance.now();
 
   function animate(){
-    const now = performance.now();
-    const dt = Math.min(0.05, (now - prevTime)/1000);
-    prevTime = now;
-
-    // input -> acceleration
-    const forward = keys.forward - keys.back;
-    const strafe  = keys.right - keys.left;
-    let speed = PLAYER.speed * (isSprinting ? PLAYER.sprintMultiplier : 1);
+    const now = performance.now(); const dt = Math.min(0.05, (now - prevTime)/1000); prevTime = now;
+    const forward = keys.forward - keys.back; const strafe  = keys.right - keys.left; let speed = PLAYER.speed * (isSprinting ? PLAYER.sprintMultiplier : 1);
     const forwardVec = new THREE.Vector3(); yaw.getWorldDirection(forwardVec); forwardVec.y = 0; forwardVec.normalize();
     const rightVec = new THREE.Vector3(); rightVec.crossVectors(new THREE.Vector3(0,1,0), forwardVec).normalize();
-    // desired velocity
     const desired = new THREE.Vector3(); desired.addScaledVector(forwardVec, forward * speed); desired.addScaledVector(rightVec, strafe * speed);
-    // smooth horizontal
-    velocity.x += (desired.x - velocity.x) * 10 * dt;
-    velocity.z += (desired.z - velocity.z) * 10 * dt;
-    // gravity
-    velocity.y -= 20 * dt;
-
-    // compute intended movement
-    let dx = velocity.x * dt;
-    let dy = velocity.y * dt;
-    let dz = velocity.z * dt;
-
-    // allow small step-up when colliding horizontally
-    // Save original pos
-    const origPos = playerPos.clone();
-    // move with collisions
-    movePlayer(dx, dy, dz);
-
-    // if collided horizontally and on ground, try small step up
+    velocity.x += (desired.x - velocity.x) * 10 * dt; velocity.z += (desired.z - velocity.z) * 10 * dt; velocity.y -= 20 * dt;
+    let dx = velocity.x * dt; let dy = velocity.y * dt; let dz = velocity.z * dt;
+    const origPos = playerPos.clone(); movePlayer(dx, dy, dz);
     if((Math.abs(playerPos.x - (origPos.x + dx)) > 1e-5 || Math.abs(playerPos.z - (origPos.z + dz)) > 1e-5) && checkOnGround()){
-      // try step up 0.5
-      const stepHeight = 0.5;
-      playerPos.y += stepHeight;
-      // try to move horizontally again
-      movePlayer(dx, 0, dz);
-      // if still colliding revert y
-      if(Math.abs(playerPos.x - (origPos.x + dx)) > 1e-5 || Math.abs(playerPos.z - (origPos.z + dz)) > 1e-5){ playerPos.y = origPos.y; }
-      else { /* successful step: keep */ }
+      const stepHeight = 0.5; playerPos.y += stepHeight; movePlayer(dx, 0, dz); if(Math.abs(playerPos.x - (origPos.x + dx)) > 1e-5 || Math.abs(playerPos.z - (origPos.z + dz)) > 1e-5){ playerPos.y = origPos.y; }
     }
-
-    // damping small velocities
-    if(Math.abs(velocity.x) < 0.01) velocity.x = 0;
-    if(Math.abs(velocity.z) < 0.01) velocity.z = 0;
-
-    // update canJump if on ground
+    if(Math.abs(velocity.x) < 0.01) velocity.x = 0; if(Math.abs(velocity.z) < 0.01) velocity.z = 0;
     if(checkOnGround()){ canJump = true; velocity.y = Math.max(velocity.y, -1); }
-
-    // update yaw position and camera
-    yaw.position.set(playerPos.x, playerPos.y + PLAYER.eye, playerPos.z);
-    updateCamera();
-
-    renderer.render(scene, camera);
-
-    // fps
-    fpsCount++;
-    if(now - fpsLast > 500){ fpsEl.textContent = Math.round((fpsCount*1000)/(now-fpsLast)); fpsLast = now; fpsCount = 0; }
-
+    yaw.position.set(playerPos.x, playerPos.y + PLAYER.eye, playerPos.z); updateCamera(); renderer.render(scene, camera);
+    fpsCount++; if(now - fpsLast > 500){ fpsEl.textContent = Math.round((fpsCount*1000)/(now-fpsLast)); fpsLast = now; fpsCount = 0; }
     requestAnimationFrame(animate);
   }
 
-  // initial camera and start
-  yaw.position.copy(playerPos);
-  updateCamera();
+  // start
+  yaw.position.copy(playerPos); updateCamera(); document.getElementById('loading').remove(); animate();
 
-  // finish loading
-  document.getElementById('loading').remove();
-  animate();
-
-  // handle window resize
+  // resize
   window.addEventListener('resize', ()=>{ camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+  // helper: show errors
+  } catch(err){
+    console.error(err);
+    const el = document.getElementById('errorOverlay'); el.style.display = 'block'; el.textContent = 'Runtime error: ' + (err && err.message ? err.message : String(err)) + '
+
+Open devtools for stack trace.';
+    // remove loading to avoid stuck UI
+    const ld = document.getElementById('loading'); if(ld) ld.remove();
+  }
   </script>
 </body>
 </html>
