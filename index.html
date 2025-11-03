@@ -314,9 +314,10 @@ class Particle {
   init(x,y,vx,vy,life,color){ this.x=x; this.y=y; this.vx=vx; this.vy=vy; this.life=life; this.maxLife=life; this.color=color; this.alive=true; }
   update(dt){ if(!this.alive) return; this.life -= dt; if(this.life <= 0){ this.alive = false; return; } this.vy += 80 * dt; // gravity tiny
     this.x += this.vx * dt; this.y += this.vy * dt; }
-  draw(ctx){ if(!this.alive) return; const a = Math.max(0, this.life / this.maxLife);
+  draw(ctx){ if(!this.alive) return;
     // draw as 1x1 world pixel so it's crisp and "cube'y" when scaled
-    ctx.globalAlpha = a;
+    // **MAKE OPAQUE**: do not scale alpha by life — draw fully opaque
+    ctx.globalAlpha = 1;
     ctx.fillStyle = this.color;
     // draw exact 1x1 world unit square
     ctx.fillRect(Math.round(this.x), Math.round(this.y), 1, 1);
@@ -402,12 +403,22 @@ class Player{
         const speedMul = this.running ? 50 : 18;
         const pvx = (-vx * (10 + Math.random()*speedMul)) + (Math.random()*20 - 10);
         const pvy = (-vy * (6 + Math.random()*12)) + (Math.random()*6 - 3);
-        // choose color by ground tile underfoot (dirt -> brown, grass -> pale green, water -> blue splash)
+
+        // choose color by ground tile underfoot (dirt -> brown, grass -> variant greens, water -> blue splash)
         const tx = Math.floor(this.x / TILE), ty = Math.floor(this.y / TILE);
         let color = '#c6b28a'; // default dirt-like
         const tileUnder = world.getTile(tx,ty);
-        if(tileUnder >= TILE_GRASS_BASE && tileUnder < TILE_GRASS_BASE + GRASS_VARIANTS) color = '#8bd26a';
-        else if(tileUnder === TILE_WATER) color = '#6fc3ff';
+        if(tileUnder >= TILE_GRASS_BASE && tileUnder < TILE_GRASS_BASE + GRASS_VARIANTS) {
+          // pick color based on grass variant stored in world.grassVariant
+          const gv = world.grassVariant[world.idx(tx,ty)] || 0;
+          const grassPalette = ['#7cc85b','#6fb23a','#8bdc66','#5fb03a'];
+          color = grassPalette[gv] || '#8bd26a';
+        } else if(tileUnder === TILE_DIRT) {
+          color = '#9f6b3a';
+        } else if(tileUnder === TILE_WATER) {
+          color = '#6fc3ff';
+        }
+
         // lifetime shorter for running to keep count low
         const life = this.running ? 0.35 + Math.random()*0.2 : 0.6 + Math.random()*0.4;
         particleSystem.spawn(px, py, pvx, pvy, life, color);
