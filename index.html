@@ -258,7 +258,7 @@ const STAMINA_RECOVER_PER_SEC = 5;
 const treeImg = new Image();
 treeImg.src = 'Tree.png'; // 16x16 pixel-art tree
 let TREE_WORLD_SIZE = TILE * 1.0; // world units
-let TREE_RADIUS = TREE_WORLD_SIZE * 0.75;
+let TREE_RADIUS = TREE_WORLD_SIZE * 5;
 let treeMask = null; let treeImgW = 0, treeImgH = 0;
 treeImg.onload = () => {
   treeImgW = treeImg.width; treeImgH = treeImg.height; TREE_RADIUS = TREE_WORLD_SIZE * 0.45;
