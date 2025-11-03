@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>MineLite — Trees use image-based collision</title>
+  <title>MineLite — Pixel tiles + tree per-pixel collision</title>
   <style>
     html,body{height:100%;margin:0;background:#0b1220;color:#ddd;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;overflow:hidden}
     canvas{display:block}
@@ -65,10 +65,8 @@ function resizeCanvas(){
   canvas.width = Math.floor(canvasW * DPR);
   canvas.height = Math.floor(canvasH * DPR);
 
-  // make browser scale crisp for pixel art
+  // prefer crisp pixel scaling
   canvas.style.imageRendering = 'pixelated';
-
-  // ui scale
   const baselineW = 1920, baselineH = 1080;
   const ratio = Math.min(canvasW / baselineW, canvasH / baselineH);
   uiScale = Math.min(2.0, Math.max(0.75, ratio * DPR));
@@ -78,13 +76,74 @@ function resizeCanvas(){
 }
 window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
-
-// stop ctrl+scroll browser zoom
 window.addEventListener('wheel', function(e){ if(e.ctrlKey){ e.preventDefault(); } }, {passive:false});
 window.addEventListener('gesturestart', e=>{ e.preventDefault(); }, {passive:false});
 function styleHUD(){ const hud=document.getElementById('hud'), st=document.getElementById('stamina'); if(hud) hud.style.transform=`scale(${uiScale})`; if(st) st.style.transform=`scale(${uiScale})`; }
 
-// -------------------- World generation --------------------
+// -------------------- Pixelated tile atlas (8x8 blocks) --------------------
+function createPixelatedTileAtlas(blockSize = 8){
+  const off = document.createElement('canvas');
+  off.width = (GRASS_VARIANTS + 2) * TILE;
+  off.height = TILE;
+  const oc = off.getContext('2d');
+  oc.imageSmoothingEnabled = false;
+
+  // helper to fill tile with 8x8 block pattern, with baseColor and shade array for variation
+  function fillBlocky(x, y, baseColor, shade1, shade2){
+    for(let by=0; by<TILE; by+=blockSize){
+      for(let bx=0; bx<TILE; bx+=blockSize){
+        // create simple variation using coords
+        const v = ((Math.floor(bx/blockSize) + Math.floor(by/blockSize)) & 1);
+        oc.fillStyle = v ? shade1 : shade2;
+        oc.fillRect(x + bx, y + by, blockSize, blockSize);
+      }
+    }
+    // small random darker pixels (sparse)
+    for(let i=0;i<16;i++){
+      const px = x + Math.floor(Math.random() * TILE / blockSize) * blockSize;
+      const py = y + Math.floor(Math.random() * TILE / blockSize) * blockSize;
+      oc.fillStyle = 'rgba(0,0,0,0.06)';
+      oc.fillRect(px, py, Math.max(1, Math.floor(blockSize/2)), Math.max(1, Math.floor(blockSize/2)));
+    }
+  }
+
+  // grass variants (blocky)
+  const grassPairs = [
+    ['#7cc85b','#55a73a'],
+    ['#6fb23a','#4b8d2e'],
+    ['#8bdc66','#52a544'],
+    ['#5fb03a','#3f7b2a']
+  ];
+  for(let v=0; v<GRASS_VARIANTS; v++){
+    const gx = v * TILE;
+    fillBlocky(gx, 0, grassPairs[v][0], grassPairs[v][0], grassPairs[v][1]);
+  }
+
+  // dirt tile
+  const dx = GRASS_VARIANTS * TILE;
+  fillBlocky(dx, 0, '#9f6b3a', '#8a5a33', '#7a4b2a');
+
+  // water tile (blocky blue strips)
+  const wx = (GRASS_VARIANTS + 1) * TILE;
+  // base water blocks
+  for(let by=0; by<TILE; by+=blockSize){
+    for(let bx=0; bx<TILE; bx+=blockSize){
+      oc.fillStyle = ( ((by/blockSize)|0) % 2 === 0 ) ? '#3aa9df' : '#1f6fa8';
+      oc.fillRect(wx + bx, by, blockSize, blockSize);
+    }
+  }
+  // add simple wave stripes (8x8)
+  for(let i=0;i<3;i++){
+    oc.globalAlpha = 0.08;
+    oc.fillStyle = '#ffffff';
+    oc.fillRect(wx + i*6 + 2, 6 + i*3, TILE-8, 2);
+    oc.globalAlpha = 1;
+  }
+
+  return off;
+}
+
+// -------------------- World (unchanged logic) --------------------
 class World {
   constructor(w,h){
     this.w=w; this.h=h;
@@ -93,7 +152,7 @@ class World {
     this.grassVariant = new Uint8Array(w*h);
     this.rockOffsetX = new Float32Array(w*h);
     this.rockOffsetY = new Float32Array(w*h);
-    this.treeAnchor = new Uint8Array(w*h); // store 1 on anchor tile of each 2x2 tree
+    this.treeAnchor = new Uint8Array(w*h);
     this.seed = Math.floor(Math.random()*1e9);
     this.generate();
   }
@@ -106,7 +165,6 @@ class World {
     const seed = this.seed; const biomeScale = 90; const localScale = 8;
     const biome = new Float32Array(this.w*this.h);
     for(let y=0;y<this.h;y++) for(let x=0;x<this.w;x++) biome[this.idx(x,y)] = octaveNoise(x,y,seed,5,biomeScale);
-
     const placeRnd = makeSeededRandom(seed+9999);
     for(let y=0;y<this.h;y++){
       for(let x=0;x<this.w;x++){
@@ -119,16 +177,14 @@ class World {
       }
     }
 
-    // place objects (rocks, and 2x2 trees like before)
     for(let y=2; y<this.h-2; y++){
       for(let x=2; x<this.w-2; x++){
-        const i=this.idx(x,y);
-        const t = this.tiles[i]; if(t === TILE_WATER) continue;
+        const i=this.idx(x,y); const t=this.tiles[i]; if(t === TILE_WATER) continue;
         const b = biome[i]; let treeChance = 0.01; if(b >= 0.33 && b < 0.67) treeChance = 0.06; if(b >= 0.67) treeChance = 0.02;
         if(x < this.w-2 && y < this.h-2 && placeRnd() < treeChance){
           let ok=true;
           for(let yy=y; yy<y+2; yy++) for(let xx=x; xx<x+2; xx++){
-            const idx2 = this.idx(xx,yy);
+            const idx2=this.idx(xx,yy);
             if(this.tiles[idx2] === TILE_WATER) ok=false;
             if(this.objects[idx2] !== OBJ_NONE) ok=false;
           }
@@ -136,30 +192,25 @@ class World {
             for(let yy=y; yy<y+2; yy++) for(let xx=x; xx<x+2; xx++){
               this.objects[this.idx(xx,yy)] = OBJ_TREE;
             }
-            this.treeAnchor[i] = 1; // anchor for drawing & collision at top-left cell
+            this.treeAnchor[i] = 1;
             continue;
           }
         }
-        if(this.objects[i] === OBJ_NONE && placeRnd() < 0.025){
-          this.objects[i] = OBJ_ROCK;
-          const maxOff = TILE*0.36;
-          this.rockOffsetX[i] = (placeRnd()*2-1)*maxOff;
-          this.rockOffsetY[i] = (placeRnd()*2-1)*maxOff;
-        }
+        if(this.objects[i] === OBJ_NONE && placeRnd() < 0.025){ this.objects[i] = OBJ_ROCK; const maxOff = TILE*0.36; this.rockOffsetX[i] = (placeRnd()*2-1)*maxOff; this.rockOffsetY[i] = (placeRnd()*2-1)*maxOff; }
       }
     }
   }
 
-  findSafeSpawn(){ const cx = Math.floor(this.w/2), cy = Math.floor(this.h/2); const maxR = Math.max(this.w,this.h); for(let r=0;r<maxR;r++){ for(let dy=-r; dy<=r; dy++){ for(let dx=-r; dx<=r; dx++){ const x = cx + dx, y = cy + dy; if(!this.inBounds(x,y)) continue; const i = this.idx(x,y); if(this.tiles[i] === TILE_WATER) continue; if(this.objects[i] === OBJ_TREE) continue; let blocked=false; for(let yy=y-1; yy<=y+1; yy++) for(let xx=x-1; xx<=x+1; xx++){ if(!this.inBounds(xx,yy)){ blocked=true; break; } const idx2=this.idx(xx,yy); if(this.tiles[idx2] === TILE_WATER) blocked=true; if(this.objects[idx2] === OBJ_TREE) blocked=true; } if(blocked) continue; return {x: x*TILE + TILE/2, y: y*TILE + TILE/2}; } } } return {x: cx*TILE + TILE/2, y: cy*TILE + TILE/2}; }
+  findSafeSpawn(){ const cx=Math.floor(this.w/2), cy=Math.floor(this.h/2); const maxR=Math.max(this.w,this.h); for(let r=0;r<maxR;r++){ for(let dy=-r; dy<=r; dy++){ for(let dx=-r; dx<=r; dx++){ const x=cx+dx, y=cy+dy; if(!this.inBounds(x,y)) continue; const i=this.idx(x,y); if(this.tiles[i]===TILE_WATER) continue; if(this.objects[i]===OBJ_TREE) continue; let blocked=false; for(let yy=y-1; yy<=y+1; yy++) for(let xx=x-1; xx<=x+1; xx++){ if(!this.inBounds(xx,yy)){ blocked=true; break; } const idx2=this.idx(xx,yy); if(this.tiles[idx2]===TILE_WATER) blocked=true; if(this.objects[idx2]===OBJ_TREE) blocked=true; } if(blocked) continue; return {x: x*TILE + TILE/2, y: y*TILE + TILE/2}; } } } return {x: cx*TILE + TILE/2, y: cy*TILE + TILE/2}; }
 
-  // draw now uses treeImg and tree world size for trees
+  // draw uses pixelated atlas and tree sprite drawing
   draw(ctx, camera, canvas, atlas, treeImg, treeWorldSize){
     const left = Math.max(0, Math.floor((camera.x - (canvasW/2)/camera.scale)/TILE) - 1);
     const right = Math.min(this.w-1, Math.ceil((camera.x + (canvasW/2)/camera.scale)/TILE) + 1);
-    const top = Math.max(0, Math.floor((camera.y - (canvas.height/2)/camera.scale)/TILE) -1);
-    const bottom = Math.min(this.h-1, Math.ceil((camera.y + (canvas.height/2)/camera.scale)/TILE) +1);
+    const top = Math.max(0, Math.floor((camera.y - (canvasH/2)/camera.scale)/TILE) -1);
+    const bottom = Math.min(this.h-1, Math.ceil((camera.y + (canvasH/2)/camera.scale)/TILE) +1);
 
-    // tiles
+    // tiles (pixelated atlas)
     for(let yy=top; yy<=bottom; yy++){
       for(let xx=left; xx<=right; xx++){
         const i=this.idx(xx,yy);
@@ -185,37 +236,14 @@ class World {
           const cy = yy*TILE + TILE/2 + this.rockOffsetY[i];
           drawRock(ctx, cx, cy);
         } else if(o === OBJ_TREE && this.treeAnchor[i]){
-          // draw tree sprite centered at the anchor's center point (same as previous code)
-          const cx = xx*TILE + TILE; // anchor at top-left of 2x2; center = +TILE, +TILE
-          const cy = yy*TILE + TILE;
-          if(treeImg && treeImg.complete){
-            ctx.imageSmoothingEnabled = false;
-            ctx.drawImage(treeImg, -0 + (cx - treeWorldSize/2), -0 + (cy - treeWorldSize/2), treeWorldSize, treeWorldSize);
-            // note: because we set transform earlier, drawImage accepts world units; but here we used absolute positions
-            // to avoid confusion, use drawImage with positional args relative to ctx transform:
-            // we already passed absolute coords above: better approach below (replacing the above)
-          }
-        }
-      }
-    }
-
-    // The drawImage above for tree used absolute coords incorrectly under transform; we want drawImage with world coords:
-    // To keep it correct across transforms we will draw trees again properly:
-    for(let yy=top; yy<=bottom; yy++){
-      for(let xx=left; xx<=right; xx++){
-        const i=this.idx(xx,yy);
-        const o=this.objects[i];
-        if(o === OBJ_TREE && this.treeAnchor[i]){
           const cx = xx*TILE + TILE;
           const cy = yy*TILE + TILE;
           if(treeImg && treeImg.complete){
             ctx.save();
             ctx.imageSmoothingEnabled = false;
-            // draw centered at cx,cy with size treeWorldSize (world units)
             ctx.drawImage(treeImg, cx - treeWorldSize/2, cy - treeWorldSize/2, treeWorldSize, treeWorldSize);
             ctx.restore();
           } else {
-            // fallback placeholder
             ctx.save();
             ctx.fillStyle = '#2b8f2b';
             ctx.fillRect(cx - TILE/2, cy - TILE/2, TILE, TILE);
@@ -224,27 +252,17 @@ class World {
         }
       }
     }
-
   }
 }
 
 function drawRock(ctx,cx,cy){ ctx.save(); ctx.translate(cx,cy); ctx.beginPath(); ctx.ellipse(0,0,6,5,0,0,Math.PI*2); ctx.fillStyle='#6b665b'; ctx.fill(); ctx.strokeStyle='rgba(0,0,0,0.25)'; ctx.stroke(); ctx.restore(); }
 
-// create tile atlas (unchanged)
-function createTileAtlas(){
-  const off=document.createElement('canvas'); off.width=(GRASS_VARIANTS+2)*TILE; off.height=TILE; const oc=off.getContext('2d');
-  const grassColors=[['#7cc85b','#4fa043'],['#6fb23a','#4b8d2e'],['#8bdc66','#52a544'],['#5fb03a','#3f7b2a']];
-  for(let v=0; v<GRASS_VARIANTS; v++){ const gx=v*TILE; const g=oc.createLinearGradient(gx,0,gx+TILE,TILE); g.addColorStop(0,grassColors[v][0]); g.addColorStop(1,grassColors[v][1]); oc.fillStyle=g; oc.fillRect(gx,0,TILE,TILE); for(let i=0;i<40;i++){ oc.fillStyle=`rgba(0,0,0,${Math.random()*0.04})`; oc.fillRect(gx+Math.random()*TILE, Math.random()*TILE, 1,1); } }
-  const dx=GRASS_VARIANTS*TILE; const dg=oc.createLinearGradient(dx,0,dx+TILE,TILE); dg.addColorStop(0,'#9f6b3a'); dg.addColorStop(1,'#7a4b2a'); oc.fillStyle=dg; oc.fillRect(dx,0,TILE,TILE); for(let i=0;i<30;i++){ oc.fillStyle=`rgba(0,0,0,${Math.random()*0.05})`; oc.fillRect(dx+Math.random()*TILE, Math.random()*TILE, 1,1); } const wx=(GRASS_VARIANTS+1)*TILE; const wg=oc.createLinearGradient(wx,0,wx+TILE,TILE); wg.addColorStop(0,'#3aa9df'); wg.addColorStop(1,'#1f6fa8'); oc.fillStyle=wg; oc.fillRect(wx,0,TILE,TILE); oc.globalAlpha=0.08; for(let i=0;i<3;i++){ oc.fillRect(wx + i*6 + 2, 6 + i*3, TILE-8, 2); } oc.globalAlpha=1; return off;
-}
-
 // -------------------- Input + Camera --------------------
 class Input{
   constructor(canvas){
-    this.keys={};
-    this.mouse={x:0,y:0,worldX:0,worldY:0};
+    this.keys={}; this.mouse={x:0,y:0,worldX:0,worldY:0};
     canvas.addEventListener('mousemove', e=>{
-      const r=canvas.getBoundingClientRect();
+      const r = canvas.getBoundingClientRect();
       this.mouse.x = e.clientX - r.left;
       this.mouse.y = e.clientY - r.top;
     });
@@ -270,23 +288,41 @@ class Camera{
 
 // -------------------- Stamina --------------------
 const STAMINA_MAX = 100;
-const STAMINA_DRAIN_PER_SEC = 40;
-const STAMINA_RECOVER_PER_SEC = 18;
+const STAMINA_DRAIN_PER_SEC = 10;
+const STAMINA_RECOVER_PER_SEC = 8;
 
-// ---------- Tree sprite config (change these if you want different visual/collider size) ----------
+// -------------------- Tree sprite + per-pixel mask --------------------
 const treeImg = new Image();
-treeImg.src = 'Tree.png'; // put Tree.png next to the HTML
-let TREE_WORLD_SIZE = TILE * 1.0; // tree's size in WORLD UNITS (how many world units the sprite covers)
+treeImg.src = 'Tree.png'; // 16x16 pixel-art tree
+let TREE_WORLD_SIZE = TILE * 1.0; // world size in world units
 let TREE_RADIUS = TREE_WORLD_SIZE * 0.45;
+
+// binary mask for Tree.png: built on load - 1 = opaque alpha>128
+let treeMask = null;
+let treeImgW = 0, treeImgH = 0;
 treeImg.onload = () => {
-  // You can choose to adapt tree world size automatically to image natural size, but we keep a worldSize constant here.
-  // If you want world size to be proportional to image pixel size, uncomment and tune:
-  // TREE_WORLD_SIZE = TILE * (treeImg.width / 16); // e.g., base 16px -> TILE units scaling
+  treeImgW = treeImg.width;
+  treeImgH = treeImg.height;
   TREE_RADIUS = TREE_WORLD_SIZE * 0.45;
-  console.log('Tree.png loaded', treeImg.width + 'x' + treeImg.height, 'TREE_WORLD_SIZE:', TREE_WORLD_SIZE);
+  // build mask
+  const c = document.createElement('canvas');
+  c.width = treeImgW; c.height = treeImgH;
+  const cc = c.getContext('2d');
+  cc.imageSmoothingEnabled = false;
+  cc.clearRect(0,0,c.width,c.height);
+  cc.drawImage(treeImg, 0, 0);
+  const id = cc.getImageData(0,0,c.width,c.height).data;
+  treeMask = new Uint8Array(treeImgW * treeImgH);
+  for(let y=0;y<treeImgH;y++){
+    for(let x=0;x<treeImgW;x++){
+      const idx = (y*c.width + x)*4 + 3;
+      treeMask[y*c.width + x] = id[idx] > 128 ? 1 : 0;
+    }
+  }
+  console.log('Tree.png loaded', treeImgW + 'x' + treeImgH, 'mask built');
 };
 
-// -------------------- Collision helpers (circle-circle, circle-rect) --------------------
+// -------------------- Collision helpers --------------------
 function circleRectIntersect(cx,cy,r, rx,ry,rw,rh){
   const closestX = Math.max(rx, Math.min(cx, rx+rw));
   const closestY = Math.max(ry, Math.min(cy, ry+rh));
@@ -300,7 +336,45 @@ function circleCircleIntersect(x1,y1,r1, x2,y2,r2){
   return d2 <= rr;
 }
 
-// -------------------- Player (unchanged except tree collision uses circle-circle) --------------------
+// per-pixel circle vs tree mask test. returns true if any opaque pixel intersects circle
+function circleVsTreeMask(circleX, circleY, circleR, treeCenterX, treeCenterY){
+  if(!treeMask || treeImgW === 0) return false;
+  // tree world rect
+  const left_world = treeCenterX - TREE_WORLD_SIZE/2;
+  const top_world  = treeCenterY - TREE_WORLD_SIZE/2;
+  // scale: pixels per world unit
+  const pxPerWorld = treeImgW / TREE_WORLD_SIZE;
+
+  // bounding box in world for circle
+  const bx0 = circleX - circleR, bx1 = circleX + circleR;
+  const by0 = circleY - circleR, by1 = circleY + circleR;
+
+  // convert to pixel indices
+  const ix0 = Math.max(0, Math.floor((bx0 - left_world) * pxPerWorld));
+  const iy0 = Math.max(0, Math.floor((by0 - top_world) * pxPerWorld));
+  const ix1 = Math.min(treeImgW - 1, Math.floor((bx1 - left_world) * pxPerWorld));
+  const iy1 = Math.min(treeImgH - 1, Math.floor((by1 - top_world) * pxPerWorld));
+
+  if(ix1 < ix0 || iy1 < iy0) return false;
+
+  // iterate relevant pixels — stop on first hit
+  for(let py = iy0; py <= iy1; py++){
+    for(let px = ix0; px <= ix1; px++){
+      if(treeMask[py*treeImgW + px]){
+        // compute pixel center world coords
+        const pixelCenterWorldX = left_world + (px + 0.5) / pxPerWorld;
+        const pixelCenterWorldY = top_world  + (py + 0.5) / pxPerWorld;
+        const dx = pixelCenterWorldX - circleX;
+        const dy = pixelCenterWorldY - circleY;
+        if(dx*dx + dy*dy <= circleR*circleR) return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+// -------------------- Player (world-size + circle collider) --------------------
 class Player{
   constructor(x,y){
     this.x = x; this.y = y;
@@ -312,7 +386,7 @@ class Player{
     this.img.src = 'Player.png';
     this.img.onload = ()=>{ this.imgLoaded = true; console.log('Player.png loaded', this.img.width + 'x' + this.img.height); };
 
-    this.worldSize = TILE * 0.5; // player visual/world size (tweakable)
+    this.worldSize = TILE * 0.5; // change to scale player in world
     this.radius = Math.max(4, this.worldSize * 0.45);
   }
 
@@ -332,27 +406,30 @@ class Player{
     const nx = this.x + vx * speed * dt;
     const ny = this.y + vy * speed * dt;
 
-    // update radius in case worldSize changed
     this.radius = Math.max(4, this.worldSize * 0.45);
 
-    const collidesCircle = (cx,cy,r) => {
-      // 1) tile water as circle-rect
+    const collidesCircle = (cx,cy,r)=>{
+      // tiles: bounding tiles
       const tx0 = Math.floor((cx - r) / TILE), tx1 = Math.floor((cx + r) / TILE);
       const ty0 = Math.floor((cy - r) / TILE), ty1 = Math.floor((cy + r) / TILE);
-      for(let ty = tx0?ty0:ty0; ty <= ty1; ty++){
-        for(let tx = tx0; tx <= tx1; tx++){
+      for(let ty=ty0; ty<=ty1; ty++){
+        for(let tx=tx0; tx<=tx1; tx++){
           if(!world.inBounds(tx,ty)) continue;
           const tile = world.getTile(tx,ty);
           if(tile === TILE_WATER){
             if(circleRectIntersect(cx,cy,r, tx*TILE, ty*TILE, TILE, TILE)) return true;
           }
-          // tree collision: use anchor positions and circle-circle test
+          // tree anchor check: if anchor present, test per-pixel mask
           const ai = world.idx(tx,ty);
           if(world.treeAnchor[ai]){
             const anchorX = tx, anchorY = ty;
             const centerX = anchorX*TILE + TILE, centerY = anchorY*TILE + TILE;
-            // tree radius taken from TREE_RADIUS (global)
-            if(circleCircleIntersect(cx,cy,r, centerX, centerY, TREE_RADIUS)) return true;
+            // bounding quick test: if distance larger than (r + TREE_WORLD_SIZE*sqrt(2)/2) skip
+            const maxDist = r + Math.sqrt(2)*(TREE_WORLD_SIZE/2);
+            const dx = centerX - cx, dy = centerY - cy;
+            if(dx*dx + dy*dy > maxDist*maxDist) continue;
+            // now do precise per-pixel test using mask
+            if(circleVsTreeMask(cx, cy, r, centerX, centerY)) return true;
           }
         }
       }
@@ -391,7 +468,7 @@ class Player{
       ctx.fillRect(-this.worldSize/4, -this.worldSize/4, this.worldSize/2, this.worldSize/2);
     }
 
-    // debug collider (uncomment to see)
+    // debug collider:
     // ctx.beginPath(); ctx.arc(0,0,this.radius,0,Math.PI*2); ctx.strokeStyle='rgba(255,0,0,0.6)'; ctx.stroke();
 
     ctx.restore();
@@ -399,14 +476,17 @@ class Player{
 }
 
 // -------------------- Instances --------------------
+const atlas = createPixelatedTileAtlas(8);
 const world = new World(MAP_W, MAP_H);
-const atlas = createTileAtlas();
 const spawn = world.findSafeSpawn();
 const player = new Player(spawn.x, spawn.y);
 const camera = new Camera(player.x, player.y, CAMERA_DEFAULT);
 const input = new Input(canvas);
 
-// -------------------- UI: stamina --------------------
+// tree image loaded earlier (treeImg). TREE_WORLD_SIZE & TREE_RADIUS updated in onload
+treeImg.onload = treeImg.onload || (()=>{ /* already handled earlier but keep safe */ });
+
+// -------------------- Stamina UI --------------------
 function drawStaminaBar(){ const bar=document.getElementById('stamina'); if(!bar) return; const pct=player.stamina/STAMINA_MAX; const w=160,h=10,inner=Math.round(pct*w); bar.innerHTML = `Stamina: <span id="staminaVal">${Math.round(player.stamina)}</span>
   <div style="margin-top:6px;background:rgba(255,255,255,0.08);width:${w}px;height:${h}px;border-radius:6px;overflow:hidden">
     <div style="width:${inner}px;height:${h}px;background:linear-gradient(90deg,#9be15d,#27ae60);"></div>
@@ -429,22 +509,17 @@ function gameLoop(now){
 requestAnimationFrame(gameLoop);
 
 function render(){
-  // clear using identity transform
   ctx.setTransform(1,0,0,1,0,0);
   ctx.clearRect(0,0, canvas.width, canvas.height);
 
-  // world transform: scale = camera.scale * DPR
   const S = camera.scale * DPR;
   const tx = canvasW * DPR / 2 - camera.x * camera.scale * DPR;
   const ty = canvasH * DPR / 2 - camera.y * camera.scale * DPR;
   ctx.setTransform(S, 0, 0, S, tx, ty);
 
   ctx.imageSmoothingEnabled = false;
-
-  // draw world, pass treeImg and tree world size
+  // draw world passing treeImg and world size
   world.draw(ctx, camera, canvas, atlas, treeImg, TREE_WORLD_SIZE);
-
-  // draw player on top
   player.draw(ctx);
 
   // faint grid
