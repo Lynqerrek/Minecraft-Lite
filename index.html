@@ -326,7 +326,7 @@ class Particle {
 }
 
 class ParticleSystem {
-  constructor(maxParticles=90){ this.max = maxParticles; this.pool = new Array(this.max); for(let i=0;i<this.max;i++) this.pool[i] = new Particle(); }
+  constructor(maxParticles=55){ this.max = maxParticles; this.pool = new Array(this.max); for(let i=0;i<this.max;i++) this.pool[i] = new Particle(); }
   spawn(x,y,vx,vy,life,color){ // find free
     for(let i=0;i<this.max;i++){ const p=this.pool[i]; if(!p.alive){ p.init(x,y,vx,vy,life,color); return; } }
     // if full, replace a nearly-dead one (cheap)
