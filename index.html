@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>MineLite — Pixel-perfect 2D Top-Down</title>
+  <title>MineLite — Zoom-aware player + image collider</title>
   <style>
     html,body{height:100%;margin:0;background:#0b1220;color:#ddd;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;overflow:hidden}
     canvas{display:block}
@@ -26,7 +26,7 @@
   <div id="stamina" class="stamina">Stamina: <span id="staminaVal">100</span></div>
 
 <script>
-// -------------------- Config / helpers --------------------
+// ---------- Config + helpers ----------
 const TILE = 48;
 const MAP_W = 640, MAP_H = 640;
 let DPR = window.devicePixelRatio || 1;
@@ -42,14 +42,14 @@ const ZOOM_IN_MAX = 5;
 const ZOOM_OUT_MIN = ZOOM_IN_MAX / 2;
 const CAMERA_DEFAULT = (ZOOM_IN_MAX + ZOOM_OUT_MIN) / 1.6;
 
+function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+function lerp(a,b,t){ return a + (b-a)*t; }
 function makeSeededRandom(seed){ let s = seed>>>0; return function(){ s = (s + 0x6D2B79F5) | 0; let t = Math.imul(s ^ s>>>15, 1 | s); t = (t + Math.imul(t ^ t>>>7, 61 | t)) ^ t; return ((t ^ t>>>14) >>> 0) / 4294967296; } }
 function smoothstep(a){ return a*a*(3-2*a); }
 function valueNoise2D(x,y,seed){ const xf=Math.floor(x), yf=Math.floor(y); const rx=x-xf, ry=y-yf; const u=smoothstep(rx), v=smoothstep(ry); const r00 = makeSeededRandom(((xf*73856093) ^ (yf*19349663) ^ seed)>>>0)(); const r10 = makeSeededRandom((((xf+1)*73856093) ^ (yf*19349663) ^ seed)>>>0)(); const r01 = makeSeededRandom(((xf*73856093) ^ ((yf+1)*19349663) ^ seed)>>>0)(); const r11 = makeSeededRandom((((xf+1)*73856093) ^ ((yf+1)*19349663) ^ seed)>>>0)(); const xa = r00*(1-u) + r10*u; const xb = r01*(1-u) + r11*u; return xa*(1-v) + xb*v; }
 function octaveNoise(x,y,seed,oct=4,scale=1){ let amp=1,freq=1,sum=0,tot=0; for(let i=0;i<oct;i++){ sum += valueNoise2D(x*freq/scale, y*freq/scale, seed + i*1000) * amp; tot += amp; amp *= 0.5; freq *= 2; } return sum/tot; }
-function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
-function lerp(a,b,t){ return a + (b-a)*t; }
 
-// -------------------- Canvas + DPI + UI scaling --------------------
+// ---------- Canvas + DPI ----------
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 let canvasW = 0, canvasH = 0;
@@ -59,212 +59,153 @@ function resizeCanvas(){
   DPR = window.devicePixelRatio || 1;
   canvasW = Math.max(320, window.innerWidth);
   canvasH = Math.max(240, window.innerHeight);
-
   canvas.style.width = canvasW + 'px';
   canvas.style.height = canvasH + 'px';
   canvas.width = Math.floor(canvasW * DPR);
   canvas.height = Math.floor(canvasH * DPR);
-
-  // pixelated rendering when browser scales the canvas (keeps pixel art crisp)
-  canvas.style.imageRendering = 'pixelated';
-
-  // UI scale from baseline but clamped for sanity
-  const baselineW = 1920, baselineH = 1080;
-  const ratio = Math.min(canvasW / baselineW, canvasH / baselineH);
-  uiScale = Math.min(2.0, Math.max(0.75, ratio * DPR));
+  canvas.style.imageRendering = 'pixelated'; // prefer crisp pixels when browser scales
+  uiScale = Math.min(2.0, Math.max(0.75, (Math.min(canvasW/1920, canvasH/1080) * DPR)));
   styleHUD();
-
-  // ensure smoothing disabled by default; we'll toggle when needed
   ctx.imageSmoothingEnabled = false;
 }
 window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
-
-// block ctrl+scroll zoom in browser
 window.addEventListener('wheel', function(e){ if(e.ctrlKey){ e.preventDefault(); } }, {passive:false});
 window.addEventListener('gesturestart', e=>{ e.preventDefault(); }, {passive:false});
+function styleHUD(){ const hud=document.getElementById('hud'), st=document.getElementById('stamina'); if(hud) hud.style.transform=`scale(${uiScale})`; if(st) st.style.transform=`scale(${uiScale})`; }
 
-function styleHUD(){
-  const hud = document.getElementById('hud');
-  const st = document.getElementById('stamina');
-  if(hud){
-    hud.style.transform = `scale(${uiScale})`;
-    hud.style.left = '12px';
-    hud.style.top = '12px';
-  }
-  if(st){
-    st.style.transform = `scale(${uiScale})`;
-    st.style.left = '12px';
-    st.style.bottom = '12px';
-  }
-}
-
-// -------------------- World generation (unchanged) --------------------
+// ---------- World (unchanged except minor) ----------
 class World {
-  constructor(w,h){ this.w=w; this.h=h; this.tiles = new Uint8Array(w*h); this.objects = new Uint8Array(w*h); this.grassVariant = new Uint8Array(w*h); this.rockOffsetX = new Float32Array(w*h); this.rockOffsetY = new Float32Array(w*h); this.treeAnchor = new Uint8Array(w*h); this.seed = Math.floor(Math.random()*1e9); this.generate(); }
+  constructor(w,h){ this.w=w; this.h=h; this.tiles=new Uint8Array(w*h); this.objects=new Uint8Array(w*h); this.grassVariant=new Uint8Array(w*h); this.rockOffsetX=new Float32Array(w*h); this.rockOffsetY=new Float32Array(w*h); this.treeAnchor=new Uint8Array(w*h); this.seed=Math.floor(Math.random()*1e9); this.generate(); }
   idx(x,y){ return y*this.w + x; }
   inBounds(x,y){ return x>=0 && y>=0 && x<this.w && y<this.h; }
   getTile(x,y){ if(!this.inBounds(x,y)) return TILE_WATER; return this.tiles[this.idx(x,y)]; }
   getObject(x,y){ if(!this.inBounds(x,y)) return OBJ_NONE; return this.objects[this.idx(x,y)]; }
-  setTile(x,y,v){ if(!this.inBounds(x,y)) return; this.tiles[this.idx(x,y)] = v; }
-  setObject(x,y,v){ if(!this.inBounds(x,y)) return; this.objects[this.idx(x,y)] = v; }
-
-  generate(){
-    const seed = this.seed; const biomeScale = 90; const localScale = 8;
-    const biome = new Float32Array(this.w*this.h);
-    for(let y=0;y<this.h;y++) for(let x=0;x<this.w;x++) biome[this.idx(x,y)] = octaveNoise(x,y,seed,5,biomeScale);
-    const rnd = makeSeededRandom(seed+42);
-    for(let y=0;y<this.h;y++){
-      for(let x=0;x<this.w;x++){
-        const i = this.idx(x,y); const b = biome[i];
+  generate(){ const seed=this.seed, biomeScale=90, localScale=8; const biome=new Float32Array(this.w*this.h); for(let y=0;y<this.h;y++) for(let x=0;x<this.w;x++) biome[this.idx(x,y)] = octaveNoise(x,y,seed,5,biomeScale);
+    const placeRnd=makeSeededRandom(seed+9999);
+    for(let y=0;y<this.h;y++){ for(let x=0;x<this.w;x++){ const i=this.idx(x,y); const b=biome[i];
         if(x < BARRIER_THICKNESS || y < BARRIER_THICKNESS || x > this.w-1-BARRIER_THICKNESS || y > this.h-1-BARRIER_THICKNESS){ this.tiles[i] = TILE_WATER; continue; }
         if(b < 0.35){ const local = octaveNoise(x,y,seed+2000,3,localScale); this.tiles[i] = (local < 0.5) ? TILE_WATER : TILE_GRASS_BASE + Math.floor(octaveNoise(x,y,seed+7000,2,4)*GRASS_VARIANTS); }
-        else if(b < 0.67){ this.tiles[i] = TILE_GRASS_BASE + Math.floor(octaveNoise(x,y,seed+3000,3,6)*GRASS_VARIANTS); }
-        else { const local = octaveNoise(x,y,seed+4000,3,6); this.tiles[i] = (local < 0.6) ? TILE_DIRT : TILE_GRASS_BASE + Math.floor(octaveNoise(x,y,seed+8000,2,4)*GRASS_VARIANTS); }
+        else if(b < 0.67){ this.tiles[i] = TILE_GRASS_BASE + Math.floor(octaveNoise(x,y,seed+3000,3,6)*GRASS_VARIANTS); } else { const local = octaveNoise(x,y,seed+4000,3,6); this.tiles[i] = (local < 0.6) ? TILE_DIRT : TILE_GRASS_BASE + Math.floor(octaveNoise(x,y,seed+8000,2,4)*GRASS_VARIANTS); }
         if(this.tiles[i] >= TILE_GRASS_BASE && this.tiles[i] < TILE_GRASS_BASE+GRASS_VARIANTS) this.grassVariant[i] = this.tiles[i] - TILE_GRASS_BASE;
-      }
-    }
-    const placeRnd = makeSeededRandom(seed+9999);
-    for(let y=2; y<this.h-2; y++){
-      for(let x=2; x<this.w-2; x++){
-        const i=this.idx(x,y); const t=this.tiles[i]; if(t===TILE_WATER) continue;
-        const b = biome[i]; let treeChance = 0.01; if(b >= 0.33 && b < 0.67) treeChance = 0.06; if(b >= 0.67) treeChance = 0.02;
-        if(x < this.w-2 && y < this.h-2 && placeRnd() < treeChance){
-          let ok=true;
-          for(let yy=y; yy<y+2; yy++) for(let xx=x; xx<x+2; xx++){ const idx2=this.idx(xx,yy); if(this.tiles[idx2]===TILE_WATER) ok=false; if(this.objects[idx2]!==OBJ_NONE) ok=false; }
-          if(ok){ for(let yy=y; yy<y+2; yy++) for(let xx=x; xx<x+2; xx++){ this.objects[this.idx(xx,yy)] = OBJ_TREE; } this.treeAnchor[i] = 1; continue; }
-        }
-        if(this.objects[i] === OBJ_NONE && placeRnd() < 0.025){ this.objects[i] = OBJ_ROCK; const maxOff = TILE*0.36; this.rockOffsetX[i] = (placeRnd()*2-1)*maxOff; this.rockOffsetY[i] = (placeRnd()*2-1)*maxOff; }
-      }
-    }
+    } }
+    for(let y=2;y<this.h-2;y++){ for(let x=2;x<this.w-2;x++){ const i=this.idx(x,y); if(this.tiles[i]===TILE_WATER) continue; const b=biome[i]; let treeChance=0.01; if(b>=0.33 && b<0.67) treeChance=0.06; if(b>=0.67) treeChance=0.02;
+        if(x < this.w-2 && y < this.h-2 && placeRnd() < treeChance){ let ok=true; for(let yy=y; yy<y+2; yy++) for(let xx=x; xx<x+2; xx++){ const idx2=this.idx(xx,yy); if(this.tiles[idx2]===TILE_WATER) ok=false; if(this.objects[idx2]!==OBJ_NONE) ok=false; } if(ok){ for(let yy=y; yy<y+2; yy++) for(let xx=x; xx<x+2; xx++){ this.objects[this.idx(xx,yy)] = OBJ_TREE; } this.treeAnchor[i]=1; continue; } }
+        if(this.objects[i]===OBJ_NONE && placeRnd() < 0.025){ this.objects[i]=OBJ_ROCK; const maxOff = TILE*0.36; this.rockOffsetX[i] = (placeRnd()*2-1)*maxOff; this.rockOffsetY[i] = (placeRnd()*2-1)*maxOff; }
+    } }
   }
-
-  findSafeSpawn(){ const cx=Math.floor(this.w/2), cy=Math.floor(this.h/2); const maxR = Math.max(this.w,this.h); for(let r=0;r<maxR;r++){ for(let dy=-r; dy<=r; dy++){ for(let dx=-r; dx<=r; dx++){ const x=cx+dx, y=cy+dy; if(!this.inBounds(x,y)) continue; const i=this.idx(x,y); if(this.tiles[i]===TILE_WATER) continue; if(this.objects[i]===OBJ_TREE) continue; let blocked=false; for(let yy=y-1; yy<=y+1; yy++) for(let xx=x-1; xx<=x+1; xx++){ if(!this.inBounds(xx,yy)){ blocked=true; break; } const idx2=this.idx(xx,yy); if(this.tiles[idx2]===TILE_WATER) blocked=true; if(this.objects[idx2]===OBJ_TREE) blocked=true; } if(blocked) continue; return {x: x*TILE + TILE/2, y: y*TILE + TILE/2}; } } } return {x: cx*TILE + TILE/2, y: cy*TILE + TILE/2}; }
-
+  findSafeSpawn(){ const cx=Math.floor(this.w/2), cy=Math.floor(this.h/2); const maxR=Math.max(this.w,this.h); for(let r=0;r<maxR;r++){ for(let dy=-r; dy<=r; dy++){ for(let dx=-r; dx<=r; dx++){ const x=cx+dx, y=cy+dy; if(!this.inBounds(x,y)) continue; const i=this.idx(x,y); if(this.tiles[i]===TILE_WATER) continue; if(this.objects[i]===OBJ_TREE) continue; let blocked=false; for(let yy=y-1; yy<=y+1; yy++) for(let xx=x-1; xx<=x+1; xx++){ if(!this.inBounds(xx,yy)){ blocked=true; break; } const idx2=this.idx(xx,yy); if(this.tiles[idx2]===TILE_WATER) blocked=true; if(this.objects[idx2]===OBJ_TREE) blocked=true; } if(blocked) continue; return {x: x*TILE + TILE/2, y: y*TILE + TILE/2}; } } } return {x: cx*TILE + TILE/2, y: cy*TILE + TILE/2}; }
   draw(ctx,camera,canvas,atlas){
     const left = Math.max(0, Math.floor((camera.x - (canvasW/2)/camera.scale)/TILE) - 1);
     const right = Math.min(this.w-1, Math.ceil((camera.x + (canvasW/2)/camera.scale)/TILE) + 1);
     const top = Math.max(0, Math.floor((camera.y - (canvasH/2)/camera.scale)/TILE) -1);
     const bottom = Math.min(this.h-1, Math.ceil((camera.y + (canvasH/2)/camera.scale)/TILE) +1);
-    for(let yy=top; yy<=bottom; yy++){
-      for(let xx=left; xx<=right; xx++){
-        const i=this.idx(xx,yy); const tile=this.tiles[i];
-        if(tile >= TILE_GRASS_BASE && tile < TILE_GRASS_BASE+GRASS_VARIANTS){
-          const varIdx = this.grassVariant[i];
-          ctx.drawImage(atlas, varIdx*TILE, 0, TILE, TILE, xx*TILE, yy*TILE, TILE, TILE);
-        } else if(tile === TILE_DIRT){
-          ctx.drawImage(atlas, GRASS_VARIANTS*TILE, 0, TILE, TILE, xx*TILE, yy*TILE, TILE, TILE);
-        } else {
-          ctx.drawImage(atlas, (GRASS_VARIANTS+1)*TILE, 0, TILE, TILE, xx*TILE, yy*TILE, TILE, TILE);
-        }
-      }
-    }
-    for(let yy=top; yy<=bottom; yy++){
-      for(let xx=left; xx<=right; xx++){
-        const i=this.idx(xx,yy); const o=this.objects[i];
+    for(let yy=top; yy<=bottom; yy++){ for(let xx=left; xx<=right; xx++){ const i=this.idx(xx,yy); const tile=this.tiles[i];
+        if(tile >= TILE_GRASS_BASE && tile < TILE_GRASS_BASE+GRASS_VARIANTS){ const varIdx=this.grassVariant[i]; ctx.drawImage(atlas, varIdx*TILE, 0, TILE, TILE, xx*TILE, yy*TILE, TILE, TILE); }
+        else if(tile === TILE_DIRT){ ctx.drawImage(atlas, GRASS_VARIANTS*TILE, 0, TILE, TILE, xx*TILE, yy*TILE, TILE, TILE); }
+        else { ctx.drawImage(atlas, (GRASS_VARIANTS+1)*TILE, 0, TILE, TILE, xx*TILE, yy*TILE, TILE, TILE); }
+    } }
+    for(let yy=top; yy<=bottom; yy++){ for(let xx=left; xx<=right; xx++){ const i=this.idx(xx,yy); const o=this.objects[i];
         if(o === OBJ_ROCK){ const cx = xx*TILE + TILE/2 + this.rockOffsetX[i]; const cy = yy*TILE + TILE/2 + this.rockOffsetY[i]; drawRock(ctx,cx,cy); }
         else if(o === OBJ_TREE && this.treeAnchor[i]){ const cx = xx*TILE + TILE; const cy = yy*TILE + TILE; drawTreeLarge(ctx,cx,cy); }
-      }
-    }
+    } }
   }
 }
 
 function drawRock(ctx,cx,cy){ ctx.save(); ctx.translate(cx,cy); ctx.beginPath(); ctx.ellipse(0,0,6,5,0,0,Math.PI*2); ctx.fillStyle='#6b665b'; ctx.fill(); ctx.strokeStyle='rgba(0,0,0,0.25)'; ctx.stroke(); ctx.restore(); }
 function drawTreeLarge(ctx,cx,cy){ ctx.save(); ctx.translate(cx,cy); ctx.fillStyle='#6a4b2a'; ctx.fillRect(-6,6,12,12); ctx.beginPath(); ctx.ellipse(0,-4,26,20,0,0,Math.PI*2); ctx.fillStyle='#147a2c'; ctx.fill(); ctx.beginPath(); ctx.ellipse(-8,-14,18,14,0,0,Math.PI*2); ctx.fillStyle='#1aa13a'; ctx.fill(); ctx.beginPath(); ctx.ellipse(12,-12,14,10,0,0,Math.PI*2); ctx.fillStyle='#0f6b24'; ctx.fill(); ctx.restore(); }
+function createTileAtlas(){ const off=document.createElement('canvas'); off.width=(GRASS_VARIANTS+2)*TILE; off.height=TILE; const oc=off.getContext('2d'); const grassColors=[['#7cc85b','#4fa043'],['#6fb23a','#4b8d2e'],['#8bdc66','#52a544'],['#5fb03a','#3f7b2a']]; for(let v=0; v<GRASS_VARIANTS; v++){ const gx=v*TILE; const g=oc.createLinearGradient(gx,0,gx+TILE,TILE); g.addColorStop(0,grassColors[v][0]); g.addColorStop(1,grassColors[v][1]); oc.fillStyle=g; oc.fillRect(gx,0,TILE,TILE); for(let i=0;i<40;i++){ oc.fillStyle=`rgba(0,0,0,${Math.random()*0.04})`; oc.fillRect(gx+Math.random()*TILE, Math.random()*TILE, 1,1); } } const dx=GRASS_VARIANTS*TILE; const dg=oc.createLinearGradient(dx,0,dx+TILE,TILE); dg.addColorStop(0,'#9f6b3a'); dg.addColorStop(1,'#7a4b2a'); oc.fillStyle=dg; oc.fillRect(dx,0,TILE,TILE); for(let i=0;i<30;i++){ oc.fillStyle=`rgba(0,0,0,${Math.random()*0.05})`; oc.fillRect(dx+Math.random()*TILE, Math.random()*TILE, 1,1); } const wx=(GRASS_VARIANTS+1)*TILE; const wg=oc.createLinearGradient(wx,0,wx+TILE,TILE); wg.addColorStop(0,'#3aa9df'); wg.addColorStop(1,'#1f6fa8'); oc.fillStyle=wg; oc.fillRect(wx,0,TILE,TILE); oc.globalAlpha=0.08; for(let i=0;i<3;i++){ oc.fillRect(wx + i*6 + 2, 6 + i*3, TILE-8, 2); } oc.globalAlpha=1; return off; }
 
-function createTileAtlas(){
-  const off=document.createElement('canvas'); off.width=(GRASS_VARIANTS+2)*TILE; off.height=TILE; const oc=off.getContext('2d');
-  const grassColors=[['#7cc85b','#4fa043'],['#6fb23a','#4b8d2e'],['#8bdc66','#52a544'],['#5fb03a','#3f7b2a']];
-  for(let v=0; v<GRASS_VARIANTS; v++){ const gx=v*TILE; const g=oc.createLinearGradient(gx,0,gx+TILE,TILE); g.addColorStop(0,grassColors[v][0]); g.addColorStop(1,grassColors[v][1]); oc.fillStyle=g; oc.fillRect(gx,0,TILE,TILE); for(let i=0;i<40;i++){ oc.fillStyle=`rgba(0,0,0,${Math.random()*0.04})`; oc.fillRect(gx+Math.random()*TILE, Math.random()*TILE, 1,1); } }
-  const dx=GRASS_VARIANTS*TILE; const dg=oc.createLinearGradient(dx,0,dx+TILE,TILE); dg.addColorStop(0,'#9f6b3a'); dg.addColorStop(1,'#7a4b2a'); oc.fillStyle=dg; oc.fillRect(dx,0,TILE,TILE); for(let i=0;i<30;i++){ oc.fillStyle=`rgba(0,0,0,${Math.random()*0.05})`; oc.fillRect(dx+Math.random()*TILE, Math.random()*TILE, 1,1); }
-  const wx=(GRASS_VARIANTS+1)*TILE; const wg=oc.createLinearGradient(wx,0,wx+TILE,TILE); wg.addColorStop(0,'#3aa9df'); wg.addColorStop(1,'#1f6fa8'); oc.fillStyle=wg; oc.fillRect(wx,0,TILE,TILE); oc.globalAlpha=0.08; for(let i=0;i<3;i++){ oc.fillRect(wx + i*6 + 2, 6 + i*3, TILE-8, 2); } oc.globalAlpha=1; return off;
-}
+// ---------- Input + Camera ----------
+class Input{ constructor(canvas){ this.keys={}; this.mouse={x:0,y:0,worldX:0,worldY:0}; canvas.addEventListener('mousemove', e=>{ const r=canvas.getBoundingClientRect(); this.mouse.x = e.clientX - r.left; this.mouse.y = e.clientY - r.top; }); canvas.addEventListener('wheel', e=>{ e.preventDefault(); if(!e.ctrlKey) camera.targetScale = clamp(camera.targetScale * (1 - e.deltaY * 0.0012), ZOOM_OUT_MIN, ZOOM_IN_MAX); }, {passive:false}); window.addEventListener('keydown', e=>{ this.keys[e.key.toLowerCase()] = true; }); window.addEventListener('keyup', e=>{ this.keys[e.key.toLowerCase()] = false; }); } isDown(k){ return !!this.keys[k.toLowerCase()]; } }
 
-// -------------------- Input + Camera --------------------
-class Input{
-  constructor(canvas){
-    this.keys={}; this.mouse={x:0,y:0,worldX:0,worldY:0};
-    canvas.addEventListener('mousemove', e=>{
-      const r = canvas.getBoundingClientRect();
-      this.mouse.x = e.clientX - r.left;
-      this.mouse.y = e.clientY - r.top;
-    });
-    canvas.addEventListener('wheel', e=>{
-      e.preventDefault();
-      if(!e.ctrlKey){
-        camera.targetScale = clamp(camera.targetScale * (1 - e.deltaY * 0.0012), ZOOM_OUT_MIN, ZOOM_IN_MAX);
-      }
-    }, {passive:false});
-    window.addEventListener('keydown', e=>{ this.keys[e.key.toLowerCase()] = true; });
-    window.addEventListener('keyup', e=>{ this.keys[e.key.toLowerCase()] = false; });
-  }
-  isDown(k){ return !!this.keys[k.toLowerCase()]; }
-}
+class Camera{ constructor(x=0,y=0,scale=CAMERA_DEFAULT){ this.x=x; this.y=y; this.scale=scale; this.targetScale=scale; this.smooth=0.12; this.zoomSmooth=0.12; } update(dt,tx,ty){ this.x = lerp(this.x, tx, this.smooth); this.y = lerp(this.y, ty, this.smooth); this.scale = lerp(this.scale, this.targetScale, this.zoomSmooth); } screenToWorld(sx,sy){ const wx = (sx - canvasW/2)/this.scale + this.x; const wy = (sy - canvasH/2)/this.scale + this.y; return {x:wx,y:wy}; } }
 
-class Camera{
-  constructor(x=0,y=0,scale=CAMERA_DEFAULT){ this.x=x; this.y=y; this.scale=scale; this.targetScale=scale; this.smooth=0.12; this.zoomSmooth=0.12; }
-  update(dt,tx,ty){ this.x = lerp(this.x, tx, this.smooth); this.y = lerp(this.y, ty, this.smooth); this.scale = lerp(this.scale, this.targetScale, this.zoomSmooth); }
-  screenToWorld(sx,sy){
-    // sx,sy are CSS pixels relative to canvas layout (canvasW, canvasH)
-    const wx = (sx - canvasW/2)/this.scale + this.x;
-    const wy = (sy - canvasH/2)/this.scale + this.y;
-    return {x:wx,y:wy};
-  }
-}
-
-// -------------------- Stamina + Player (pixel-perfect draw) --------------------
+// ---------- Stamina ----------
 const STAMINA_MAX = 100;
 const STAMINA_DRAIN_PER_SEC = 40;
 const STAMINA_RECOVER_PER_SEC = 18;
 
+// ---------- Collision helpers (circle-rect, circle-ellipse intersection) ----------
+function circleRectIntersect(cx,cy,r, rx,ry,rw,rh){
+  // find closest point on rect to circle center
+  const closestX = Math.max(rx, Math.min(cx, rx+rw));
+  const closestY = Math.max(ry, Math.min(cy, ry+rh));
+  const dx = cx - closestX, dy = cy - closestY;
+  return (dx*dx + dy*dy) <= r*r;
+}
+function circleEllipseIntersect(cx,cy,r, ex,ey, erx,ery){
+  // Inflate ellipse by circle radius and test center inside inflated ellipse.
+  // Equivalent check: ( (cx-ex)^2 / (erx + r)^2 ) + ( (cy-ey)^2 / (ery + r)^2 ) <= 1
+  const dx = cx - ex, dy = cy - ey;
+  const rx = erx + r, ry = ery + r;
+  return (dx*dx)/(rx*rx) + (dy*dy)/(ry*ry) <= 1;
+}
+
+// ---------- Player: world-size based rendering + circle collider matching sprite ----------
 class Player{
   constructor(x,y){
-    this.x=x; this.y=y; this.radius=10; this.baseSpeed=140; this.runMultiplier=1.9; this.angle=0; this.stamina = STAMINA_MAX; this.running=false;
+    this.x = x; this.y = y;
+    this.baseSpeed = 140; this.runMultiplier = 1.9; this.angle = 0;
+    this.stamina = STAMINA_MAX; this.running = false;
+
+    // sprite image
     this.img = new Image();
     this.imgLoaded = false;
-    this.img.src = 'Player.png'; // Put Player.png (16x16) next to this HTML
-    this.img.onload = ()=>{ this.imgLoaded = true; console.log('Player.png loaded', this.img.width + 'x' + this.img.height); }
+    this.img.src = 'Player.png'; // keep the 16x16 PNG next to this HTML
+    this.img.onload = ()=>{ this.imgLoaded = true; console.log('Player.png', this.img.width + 'x' + this.img.height); };
 
-    // pixelScale = integer multiplier of source pixels to draw on screen (in canvas pixels).
-    // We set pixelScale = 1 to draw 16x16 on screen — small and crisp.
-    // Change this to 2,3 etc if you want a larger pixel-art sprite (integer only).
-    this.pixelScale = 10;
+    // WORLD SIZE (in world units) -> when camera zooms, sprite will scale accordingly
+    // Default: half tile (24). Tweak this to make sprite physically larger/smaller in world.
+    this.worldSize = TILE * 0.5;
 
-    // Sprite logical fallback size (world units) — not used when imgLoaded.
-    this.spriteSize = 16;
+    // collision radius derived from worldSize (so the image is the collision)
+    this.radius = Math.max(4, this.worldSize * 0.45);
   }
 
   update(dt,input,world,camera,canvas){
+    // movement
     let vx=0,vy=0;
-    if(input.isDown('w')||input.isDown('arrowup')) vy-=1;
-    if(input.isDown('s')||input.isDown('arrowdown')) vy+=1;
-    if(input.isDown('a')||input.isDown('arrowleft')) vx-=1;
-    if(input.isDown('d')||input.isDown('arrowright')) vx+=1;
-    const mag=Math.hypot(vx,vy); if(mag>0){ vx/=mag; vy/=mag; }
+    if(input.isDown('w')||input.isDown('arrowup')) vy -= 1;
+    if(input.isDown('s')||input.isDown('arrowdown')) vy += 1;
+    if(input.isDown('a')||input.isDown('arrowleft')) vx -= 1;
+    if(input.isDown('d')||input.isDown('arrowright')) vx += 1;
+    const mag = Math.hypot(vx,vy); if(mag>0){ vx/=mag; vy/=mag; }
 
     const wantRun = input.isDown('shift');
     const canRun = wantRun && this.stamina > 1;
     this.running = canRun;
     const speed = this.baseSpeed * (this.running ? this.runMultiplier : 1);
 
-    const nx = this.x + vx*speed*dt; const ny = this.y + vy*speed*dt;
+    // attempted new position
+    const nx = this.x + vx * speed * dt;
+    const ny = this.y + vy * speed * dt;
 
-    const collides = (px,py) => {
-      const tx = Math.floor(px/TILE), ty = Math.floor(py/TILE);
-      const tile = world.getTile(tx,ty);
-      if(tile === TILE_WATER) return true;
-      for(let ay = ty-1; ay<=ty+1; ay++){
-        for(let ax = tx-1; ax<=tx+1; ax++){
-          if(!world.inBounds(ax,ay)) continue;
-          const ai = world.idx(ax,ay);
+    // update radius in case worldSize changed
+    this.radius = Math.max(4, this.worldSize * 0.45);
+
+    const collidesCircle = (cx,cy,r) => {
+      // 1) check tile water overlap: check tiles that intersect circle's bounding box
+      const tx0 = Math.floor((cx - r) / TILE), tx1 = Math.floor((cx + r) / TILE);
+      const ty0 = Math.floor((cy - r) / TILE), ty1 = Math.floor((cy + r) / TILE);
+      for(let ty = ty0; ty <= ty1; ty++){
+        for(let tx = tx0; tx <= tx1; tx++){
+          if(!world.inBounds(tx,ty)) continue;
+          const tile = world.getTile(tx,ty);
+          const rectX = tx * TILE, rectY = ty * TILE;
+          if(tile === TILE_WATER){
+            if(circleRectIntersect(cx,cy,r, rectX, rectY, TILE, TILE)) return true;
+          }
+          // objects: if tree anchors nearby, check inflated ellipse intersection
+          const ai = world.idx(tx,ty);
           if(world.treeAnchor[ai]){
-            const anchorX = ax, anchorY = ay;
+            const anchorX = tx, anchorY = ty;
             const centerX = anchorX*TILE + TILE, centerY = anchorY*TILE + TILE;
+            // tree ellipses defined earlier in generation
             const ellips = [ {dx:0, dy:-4, rx:26, ry:20}, {dx:-8, dy:-14, rx:18, ry:14}, {dx:12, dy:-12, rx:14, ry:10} ];
             for(const e of ellips){
               const ex = centerX + e.dx, ey = centerY + e.dy;
-              const nxn = (px - ex)/e.rx, nyn = (py - ey)/e.ry;
-              if(nxn*nxn + nyn*nyn <= 1) return true;
+              if(circleEllipseIntersect(cx,cy,r, ex,ey, e.rx, e.ry)) return true;
             }
           }
         }
@@ -272,10 +213,12 @@ class Player{
       return false;
     };
 
-    if(!collides(nx, this.y)) this.x = nx;
-    if(!collides(this.x, ny)) this.y = ny;
+    // try move with circle collision
+    if(!collidesCircle(nx, this.y, this.radius)) this.x = nx;
+    if(!collidesCircle(this.x, ny, this.radius)) this.y = ny;
 
-    if(this.running && (vx!==0 || vy!==0)){
+    // stamina
+    if(this.running && (vx !== 0 || vy !== 0)){
       this.stamina -= STAMINA_DRAIN_PER_SEC * dt;
       if(this.stamina < 0) this.stamina = 0;
     } else {
@@ -284,56 +227,41 @@ class Player{
     }
     const sEl = document.getElementById('staminaVal'); if(sEl) sEl.textContent = Math.round(this.stamina);
 
+    // orientation toward mouse
     const mw = camera.screenToWorld(input.mouse.x, input.mouse.y);
     this.angle = Math.atan2(mw.y - this.y, mw.x - this.x);
   }
 
   draw(ctx){
-    // IMPORTANT: render is called with world transform already set (see render()), so:
-    // world->canvas transform = S = camera.scale * DPR
-    // we'll compute world-destination size so that after transform we get integer canvas pixels = srcW * pixelScale
     ctx.save();
     ctx.translate(this.x, this.y);
 
-    // rotate so top of the sprite (image top) faces cursor:
+    // rotate so top of the sprite (image top) faces the cursor:
     const drawRot = this.angle + Math.PI/2;
     ctx.rotate(drawRot);
 
     if(this.imgLoaded){
-      // ensure nearest-neighbor sampling
+      // nearest neighbor
       ctx.imageSmoothingEnabled = false;
 
-      const srcW = this.img.width, srcH = this.img.height;
-      // desired canvas pixels for the sprite:
-      const desiredCanvasPixelsW = srcW * Math.max(1, Math.floor(this.pixelScale));
-      const desiredCanvasPixelsH = srcH * Math.max(1, Math.floor(this.pixelScale));
-
-      // current transform scale S (world -> canvas pixels) is available as global DPR * camera.scale in render()
-      // We'll compute draw size in world units so drawWorldSize * S = desiredCanvasPixels
-      // To get S we read from the transform present in ctx: but we know the app sets transform S before calling draw.
-      // Simpler: compute S from global camera.scale & DPR (matching render transform).
-      const S = camera.scale * DPR;
-
-      const drawW_world = desiredCanvasPixelsW / S;
-      const drawH_world = desiredCanvasPixelsH / S;
-
-      // drawImage destination dimensions are in world units because current transform maps them to canvas pixels
-      ctx.drawImage(this.img, -drawW_world/2, -drawH_world/2, drawW_world, drawH_world);
+      // draw at worldSize (world units). Since render() sets the world->canvas transform,
+      // the Sprite will scale together with the camera (so zoom affects on-screen size).
+      const w = this.worldSize, h = this.worldSize;
+      ctx.drawImage(this.img, -w/2, -h/2, w, h);
     } else {
-      // fallback simple pixel rect (still crisp)
       ctx.imageSmoothingEnabled = false;
-      const w = 8, h = 12;
       ctx.fillStyle = '#ffd8a8';
-      ctx.fillRect(-w/2, -h/2, w, h);
-      ctx.fillStyle = '#2b2b2b';
-      ctx.fillRect(4 - w/2, -4 - h/2, 6, 6);
+      ctx.fillRect(-this.worldSize/4, -this.worldSize/4, this.worldSize/2, this.worldSize/2);
     }
+
+    // debug: draw collision circle (uncomment to see)
+    // ctx.beginPath(); ctx.arc(0,0,this.radius,0,Math.PI*2); ctx.strokeStyle='rgba(255,0,0,0.6)'; ctx.stroke();
 
     ctx.restore();
   }
 }
 
-// -------------------- Instances --------------------
+// ---------- Instances ----------
 const world = new World(MAP_W, MAP_H);
 const atlas = createTileAtlas();
 const spawn = world.findSafeSpawn();
@@ -341,21 +269,15 @@ const player = new Player(spawn.x, spawn.y);
 const camera = new Camera(player.x, player.y, CAMERA_DEFAULT);
 const input = new Input(canvas);
 
-// -------------------- Stamina UI --------------------
-function drawStaminaBar(){
-  const bar = document.getElementById('stamina'); if(!bar) return;
-  const pct = player.stamina / STAMINA_MAX;
-  const w = 160; const h = 10;
-  const inner = Math.round(pct * w);
-  bar.innerHTML = `Stamina: <span id="staminaVal">${Math.round(player.stamina)}</span>
-    <div style="margin-top:6px;background:rgba(255,255,255,0.08);width:${w}px;height:${h}px;border-radius:6px;overflow:hidden">
-      <div style="width:${inner}px;height:${h}px;background:linear-gradient(90deg,#9be15d,#27ae60);"></div>
-    </div>`;
-}
+// ---------- Stamina UI ----------
+function drawStaminaBar(){ const bar=document.getElementById('stamina'); if(!bar) return; const pct=player.stamina/STAMINA_MAX; const w=160,h=10, inner=Math.round(pct*w); bar.innerHTML = `Stamina: <span id="staminaVal">${Math.round(player.stamina)}</span>
+  <div style="margin-top:6px;background:rgba(255,255,255,0.08);width:${w}px;height:${h}px;border-radius:6px;overflow:hidden">
+    <div style="width:${inner}px;height:${h}px;background:linear-gradient(90deg,#9be15d,#27ae60);"></div>
+  </div>`; }
 function loopUISync(){ drawStaminaBar(); requestAnimationFrame(loopUISync); }
 requestAnimationFrame(loopUISync);
 
-// -------------------- Game loop & render --------------------
+// ---------- Main loop + render ----------
 let last = performance.now();
 function gameLoop(now){
   const dt = Math.min((now-last)/1000, 1/15);
@@ -370,28 +292,24 @@ function gameLoop(now){
 requestAnimationFrame(gameLoop);
 
 function render(){
-  // clear using identity transform
+  // clear
   ctx.setTransform(1,0,0,1,0,0);
   ctx.clearRect(0,0, canvas.width, canvas.height);
 
-  // set world transform: scale = camera.scale * DPR
+  // world transform: S = camera.scale * DPR
   const S = camera.scale * DPR;
   const tx = canvasW * DPR / 2 - camera.x * camera.scale * DPR;
   const ty = canvasH * DPR / 2 - camera.y * camera.scale * DPR;
-
   ctx.setTransform(S, 0, 0, S, tx, ty);
 
-  // ensure nearest-neighbor for pixel art
+  // nearest neighbor for pixel-art
   ctx.imageSmoothingEnabled = false;
 
   world.draw(ctx,camera,canvas,atlas);
   player.draw(ctx);
 
-  // subtle grid overlay (very faint)
-  ctx.save();
-  ctx.globalAlpha = 0.02;
-  ctx.lineWidth = 1 / S;
-  ctx.strokeStyle = '#000';
+  // faint grid
+  ctx.save(); ctx.globalAlpha = 0.02; ctx.lineWidth = 1 / S; ctx.strokeStyle = '#000';
   const left = Math.floor((camera.x - (canvasW/2)/camera.scale)/TILE) - 1;
   const right = Math.ceil((camera.x + (canvasW/2)/camera.scale)/TILE) + 1;
   const top = Math.floor((camera.y - (canvasH/2)/camera.scale)/TILE) -1;
@@ -401,10 +319,8 @@ function render(){
   ctx.restore();
 }
 
-// ensure DPR/resizes reapply
 window.addEventListener('resize', ()=>{ resizeCanvas(); });
 
-// -------------------- End of script --------------------
 </script>
 </body>
 </html>
