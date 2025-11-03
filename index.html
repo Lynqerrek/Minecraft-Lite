@@ -27,7 +27,7 @@
 
 <script>
 // ---------- Config / helpers ----------
-const TILE = 48;
+const TILE = 44;
 const MAP_W = 640, MAP_H = 640;
 let DPR = window.devicePixelRatio || 1;
 
@@ -251,14 +251,14 @@ class Camera{ constructor(x=0,y=0,scale=CAMERA_DEFAULT){ this.x=x; this.y=y; thi
 
 // ---------- Stamina ----------
 const STAMINA_MAX = 100;
-const STAMINA_DRAIN_PER_SEC = 40;
-const STAMINA_RECOVER_PER_SEC = 18;
+const STAMINA_DRAIN_PER_SEC = 8;
+const STAMINA_RECOVER_PER_SEC = 5;
 
 // ---------- Tree image + per-pixel mask ----------
 const treeImg = new Image();
 treeImg.src = 'Tree.png'; // 16x16 pixel-art tree
 let TREE_WORLD_SIZE = TILE * 1.0; // world units
-let TREE_RADIUS = TREE_WORLD_SIZE * 0.45;
+let TREE_RADIUS = TREE_WORLD_SIZE * 0.75;
 let treeMask = null; let treeImgW = 0, treeImgH = 0;
 treeImg.onload = () => {
   treeImgW = treeImg.width; treeImgH = treeImg.height; TREE_RADIUS = TREE_WORLD_SIZE * 0.45;
@@ -275,7 +275,7 @@ for(let i=1;i<=3;i++){
   const r = new Image(); r.src = `Rock${i}.png`; r.onload = ()=>{ console.log(`Rock${i}.png loaded`, r.width+'x'+r.height); };
   rockImgs.push(r);
 }
-const ROCK_BASE_WORLD_SIZE = TILE * 0.34; // base rock size in world units; individual rock scales multiply this
+const ROCK_BASE_WORLD_SIZE = TILE * 0.24; // base rock size in world units; individual rock scales multiply this
 
 // ---------- Collision helpers ----------
 function circleRectIntersect(cx,cy,r, rx,ry,rw,rh){ const closestX = Math.max(rx, Math.min(cx, rx+rw)); const closestY = Math.max(ry, Math.min(cy, ry+rh)); const dx = cx - closestX, dy = cy - closestY; return (dx*dx + dy*dy) <= r*r; }
