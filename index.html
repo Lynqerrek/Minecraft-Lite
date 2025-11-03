@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>MineLite — Pixel tiles + precise tree collisions + rock sprites</title>
+  <title>MineLite — Pixel tiles + precise tree collisions + rock sprites (with particles)</title>
   <style>
     html,body{height:100%;margin:0;background:#0b1220;color:#ddd;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;overflow:hidden}
     canvas{display:block}
@@ -308,12 +308,61 @@ function circleVsTreeMask(circleX, circleY, circleR, treeCenterX, treeCenterY){
   return false;
 }
 
+// ---------- Particle system (new) ----------
+class Particle{
+  constructor(x,y,vx,vy,life,size,color){ this.x=x; this.y=y; this.vx=vx; this.vy=vy; this.life=life; this.maxLife=life; this.size=size; this.color=color; }
+  update(dt){ this.life -= dt; this.x += this.vx * dt; this.y += this.vy * dt; }
+  draw(ctx){ const t = clamp(1 - this.life / this.maxLife, 0, 1); ctx.globalAlpha = Math.max(0, 1 - t); ctx.beginPath(); ctx.ellipse(this.x, this.y, this.size * (1 - t*0.6), this.size * (1 - t*0.6), 0, 0, Math.PI*2); ctx.fillStyle = this.color; ctx.fill(); ctx.globalAlpha = 1; }
+}
+const particles = [];
+const PARTICLE_MAX = 600; // global cap for performance
+
+function spawnFootParticles(px, py, vx, vy, isRunning, world, count = 6){
+  // px,py world pos; vx,vy movement direction (normalized) - if zero provide fallback
+  const speedFactor = isRunning ? 1.6 : 1.0;
+  const baseCount = Math.min(12, Math.floor(count * (isRunning ? 1.6 : 1.0)));
+  for(let i=0;i<baseCount;i++){
+    if(particles.length >= PARTICLE_MAX) break;
+    // spawn behind player (opposite of movement) with some random spread
+    const angleBack = Math.atan2(vy, vx) + Math.PI;
+    const spread = (Math.random() - 0.5) * (isRunning ? 0.9 : 1.6);
+    const ang = angleBack + spread;
+    const speed = (30 + Math.random()*50) * speedFactor;
+    const pvx = Math.cos(ang) * (speed * (0.6 + Math.random()*0.8));
+    const pvy = Math.sin(ang) * (speed * (0.6 + Math.random()*0.8));
+    const dist = 6 + Math.random()*12;
+    const sx = px + Math.cos(angleBack) * 4 + (Math.random()-0.5)*6;
+    const sy = py + Math.sin(angleBack) * 4 + (Math.random()-0.5)*6;
+    // choose color by ground tile underfoot
+    const tileX = Math.floor(px / TILE), tileY = Math.floor(py / TILE);
+    const t = world.getTile(tileX, tileY);
+    let color = 'rgba(200,200,200,0.9)';
+    if(t >= TILE_GRASS_BASE && t < TILE_GRASS_BASE + GRASS_VARIANTS){
+      // grassy dust (greenish translucent)
+      const v = world.grassVariant[world.idx(tileX,tileY)];
+      const greens = ['#8cd86a','#7cc85b','#9be676','#6fb23a'];
+      color = greens[v % greens.length] + 'CC';
+    } else if(t === TILE_DIRT){ color = '#8b5a2bCC'; }
+    else if(t === TILE_WATER){ color = 'rgba(90,150,250,0.9)'; }
+    const size = clamp(1.2 + Math.random()*1.8, 0.8, 3.0);
+    const life = 0.35 + Math.random()*0.6;
+    particles.push(new Particle(sx, sy, pvx, pvy, life, size, color));
+  }
+}
+
+function updateParticles(dt){
+  for(let i=particles.length-1;i>=0;i--){ const p = particles[i]; p.update(dt); if(p.life <= 0) particles.splice(i,1); }
+}
+
+function drawParticles(ctx){ ctx.save(); ctx.imageSmoothingEnabled = false; for(const p of particles) p.draw(ctx); ctx.restore(); }
+
 // ---------- Player (collides with per-pixel tree masks) ----------
 class Player{
   constructor(x,y){
     this.x=x; this.y=y; this.baseSpeed=140; this.runMultiplier=1.9; this.angle=0; this.stamina=STAMINA_MAX; this.running=false;
     this.img = new Image(); this.imgLoaded = false; this.img.src = 'Player.png'; this.img.onload = ()=>{ this.imgLoaded = true; };
     this.worldSize = TILE * 0.5; this.radius = Math.max(4, this.worldSize * 0.45);
+    this.lastMoveAccum = 0; // accumulator for timed spawning when moving
   }
   update(dt,input,world,camera,canvas){
     let vx=0,vy=0; if(input.isDown('w')||input.isDown('arrowup')) vy -= 1; if(input.isDown('s')||input.isDown('arrowdown')) vy += 1; if(input.isDown('a')||input.isDown('arrowleft')) vx -= 1; if(input.isDown('d')||input.isDown('arrowright')) vx += 1; const mag=Math.hypot(vx,vy); if(mag>0){ vx/=mag; vy/=mag; }
@@ -337,14 +386,32 @@ class Player{
       }
       return false;
     };
-    if(!collidesCircle(nx, this.y, this.radius)) this.x = nx;
-    if(!collidesCircle(this.x, ny, this.radius)) this.y = ny;
+    const movedX = !collidesCircle(nx, this.y, this.radius);
+    const movedY = !collidesCircle(this.x, ny, this.radius);
+    const actuallyMoved = (vx!==0||vy!==0) && (movedX || movedY);
+    if(movedX) this.x = nx;
+    if(movedY) this.y = ny;
     if(this.running && (vx!==0 || vy!==0)){
       this.stamina -= STAMINA_DRAIN_PER_SEC * dt; if(this.stamina < 0) this.stamina = 0;
     } else { this.stamina += STAMINA_RECOVER_PER_SEC * dt; if(this.stamina > STAMINA_MAX) this.stamina = STAMINA_MAX; }
     const sEl = document.getElementById('staminaVal'); if(sEl) sEl.textContent = Math.round(this.stamina);
     const mw = camera.screenToWorld(input.mouse.x, input.mouse.y);
     this.angle = Math.atan2(mw.y - this.y, mw.x - this.x);
+
+    // spawn particles when moving (best-effort logic: spawn based on movement and running state)
+    if(actuallyMoved){
+      // accumulate so we don't spawn every frame, scaled with speed
+      const spawnInterval = this.running ? 0.02 : 0.045; // running spawns more often
+      this.lastMoveAccum += dt;
+      if(this.lastMoveAccum >= spawnInterval){
+        const normVx = vx || Math.cos(this.angle);
+        const normVy = vy || Math.sin(this.angle);
+        spawnFootParticles(this.x, this.y, normVx, normVy, this.running, world, this.running ? 12 : 6);
+        this.lastMoveAccum = 0;
+      }
+    } else {
+      this.lastMoveAccum = 0;
+    }
   }
   draw(ctx){
     ctx.save(); ctx.translate(this.x, this.y); const drawRot = this.angle + Math.PI/2; ctx.rotate(drawRot);
@@ -371,7 +438,7 @@ requestAnimationFrame(loopUISync);
 
 // -------------------- Game loop + render --------------------
 let last = performance.now();
-function gameLoop(now){ const dt = Math.min((now-last)/1000, 1/15); last = now; player.update(dt,input,world,camera,canvas); camera.update(dt,player.x,player.y); const mw = camera.screenToWorld(input.mouse.x, input.mouse.y); input.mouse.worldX = mw.x; input.mouse.worldY = mw.y; render(); requestAnimationFrame(gameLoop); }
+function gameLoop(now){ const dt = Math.min((now-last)/1000, 1/15); last = now; player.update(dt,input,world,camera,canvas); updateParticles(dt); camera.update(dt,player.x,player.y); const mw = camera.screenToWorld(input.mouse.x, input.mouse.y); input.mouse.worldX = mw.x; input.mouse.worldY = mw.y; render(); requestAnimationFrame(gameLoop); }
 requestAnimationFrame(gameLoop);
 
 function render(){
@@ -381,7 +448,12 @@ function render(){
   ctx.imageSmoothingEnabled = false;
   // pass rockImgs & base size to world.draw
   world.draw(ctx, camera, canvas, atlasSmall, treeImg, TREE_WORLD_SIZE, rockImgs, ROCK_BASE_WORLD_SIZE);
+
+  // draw particles BEFORE the player so they appear behind the player
+  drawParticles(ctx);
+
   player.draw(ctx);
+
   ctx.save(); ctx.globalAlpha = 0.02; ctx.lineWidth = 1 / S; ctx.strokeStyle = '#000';
   const left = Math.floor((camera.x - (canvasW/2)/camera.scale)/TILE) - 1;
   const right = Math.ceil((camera.x + (canvasW/2)/camera.scale)/TILE) + 1;
@@ -397,3 +469,4 @@ window.addEventListener('resize', ()=>{ resizeCanvas(); });
 </script>
 </body>
 </html>
+
