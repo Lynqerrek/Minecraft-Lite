@@ -77,7 +77,7 @@ window.addEventListener('gesturestart', e=>{ e.preventDefault(); }, {passive:fal
 function styleHUD(){ const hud=document.getElementById('hud'), st=document.getElementById('stamina'); if(hud) hud.style.transform=`scale(${uiScale})`; if(st) st.style.transform=`scale(${uiScale})`; }
 
 // ---------- Pixelate existing atlas (small-scale -> nearest upscale) ----------
-function createPixelatedTileAtlas(blockSize = 8){
+function createPixelatedTileAtlas(blockSize = 64){
   const off = document.createElement('canvas');
   off.width = (GRASS_VARIANTS + 2) * TILE;
   off.height = TILE;
@@ -326,7 +326,7 @@ class Particle {
 }
 
 class ParticleSystem {
-  constructor(maxParticles=120){ this.max = maxParticles; this.pool = new Array(this.max); for(let i=0;i<this.max;i++) this.pool[i] = new Particle(); }
+  constructor(maxParticles=75){ this.max = maxParticles; this.pool = new Array(this.max); for(let i=0;i<this.max;i++) this.pool[i] = new Particle(); }
   spawn(x,y,vx,vy,life,color){ // find free
     for(let i=0;i<this.max;i++){ const p=this.pool[i]; if(!p.alive){ p.init(x,y,vx,vy,life,color); return; } }
     // if full, replace a nearly-dead one (cheap)
