@@ -77,7 +77,7 @@ window.addEventListener('gesturestart', e=>{ e.preventDefault(); }, {passive:fal
 function styleHUD(){ const hud=document.getElementById('hud'), st=document.getElementById('stamina'); if(hud) hud.style.transform=`scale(${uiScale})`; if(st) st.style.transform=`scale(${uiScale})`; }
 
 // ---------- Pixelate existing atlas (small-scale -> nearest upscale) ----------
-function createPixelatedTileAtlas(blockSize = 64){
+function createPixelatedTileAtlas(blockSize = 8){
   const off = document.createElement('canvas');
   off.width = (GRASS_VARIANTS + 2) * TILE;
   off.height = TILE;
