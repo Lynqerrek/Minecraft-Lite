@@ -314,13 +314,10 @@ class Particle {
   init(x,y,vx,vy,life,color){ this.x=x; this.y=y; this.vx=vx; this.vy=vy; this.life=life; this.maxLife=life; this.color=color; this.alive=true; }
   update(dt){ if(!this.alive) return; this.life -= dt; if(this.life <= 0){ this.alive = false; return; } this.vy += 80 * dt; // gravity tiny
     this.x += this.vx * dt; this.y += this.vy * dt; }
-  draw(ctx){ if(!this.alive) return; const a = Math.max(0, this.life / this.maxLife);
-    // draw as 1x1 world pixel so it's crisp and "cube'y" when scaled
-    ctx.globalAlpha = a;
+  draw(ctx){ if(!this.alive) return; // draw as fully opaque 1x1 world pixel so it's crisp and "cube'y"
     ctx.fillStyle = this.color;
-    // draw exact 1x1 world unit square
+    // draw exact 1x1 world unit square (rounded to integer world pixels)
     ctx.fillRect(Math.round(this.x), Math.round(this.y), 1, 1);
-    ctx.globalAlpha = 1;
   }
 }
 
@@ -334,9 +331,17 @@ class ParticleSystem {
   }
   update(dt){ for(const p of this.pool) if(p.alive) p.update(dt); }
   draw(ctx){ // draw behind player (call before drawing player for that effect)
-    // we intentionally do not sub-pixel blend to keep pixel-y look; we round positions when drawing
     for(const p of this.pool) if(p.alive) p.draw(ctx);
   }
+}
+
+// Utility: sample color from the small atlas so particle colors match tile art (neutral to future tiles)
+const _tileColorCache = new Map();
+function getTileColorFromAtlas(tileIndex){ if(_tileColorCache.has(tileIndex)) return _tileColorCache.get(tileIndex);
+  try{
+    const small = atlasSmall; const tileSmall = small.__tileSmall || 1; const sx = Math.floor(tileIndex * tileSmall + tileSmall/2);
+    const sc = small.getContext('2d'); const d = sc.getImageData(sx, Math.floor(tileSmall/2), 1, 1).data; const hex = '#' + [d[0],d[1],d[2]].map(v=>v.toString(16).padStart(2,'0')).join(''); _tileColorCache.set(tileIndex, hex); return hex;
+  }catch(e){ return '#c6b28a'; }
 }
 
 // ---------- Player (collides with per-pixel tree masks) ----------
@@ -404,12 +409,10 @@ class Player{
         const pvy = (-vy * (6 + Math.random()*12)) + (Math.random()*6 - 3);
         // choose color by ground tile underfoot (dirt -> brown, grass -> pale green, water -> blue splash)
         const tx = Math.floor(this.x / TILE), ty = Math.floor(this.y / TILE);
-        let color = '#c6b28a'; // default dirt-like
         const tileUnder = world.getTile(tx,ty);
-        if(tileUnder >= TILE_GRASS_BASE && tileUnder < TILE_GRASS_BASE + GRASS_VARIANTS) color = '#8bd26a';
-        else if(tileUnder === TILE_WATER) color = '#6fc3ff';
+        const color = getTileColorFromAtlas(tileUnder);
         // lifetime shorter for running to keep count low
-        const life = this.running ? 0.35 + Math.random()*0.2 : 0.6 + Math.random()*0.4;
+        const life = this.running ?? 0.35 + Math.random()*0.2 : 0.6 + Math.random()*0.4;
         particleSystem.spawn(px, py, pvx, pvy, life, color);
       }
     } else {
