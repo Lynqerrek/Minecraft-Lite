@@ -312,10 +312,10 @@ function circleVsTreeMask(circleX, circleY, circleR, treeCenterX, treeCenterY){
 class Particle{
   constructor(x,y,vx,vy,life,size,color){ this.x=x; this.y=y; this.vx=vx; this.vy=vy; this.life=life; this.maxLife=life; this.size=size; this.color=color; }
   update(dt){ this.life -= dt; this.x += this.vx * dt; this.y += this.vy * dt; }
-  draw(ctx){ const t = clamp(1 - this.life / this.maxLife, 0, 1); ctx.globalAlpha = Math.max(0, 1 - t); ctx.beginPath(); ctx.ellipse(this.x, this.y, this.size * (1 - t*0.6), this.size * (1 - t*0.6), 0, 0, Math.PI*2); ctx.fillStyle = this.color; ctx.fill(); ctx.globalAlpha = 1; }
+  draw(ctx){ const t = clamp(1 - this.life / this.maxLife, 0, 1); ctx.globalAlpha = Math.max(0, 1 - t); ctx.beginPath(); ctx.ellipse(this.x, this.y, this.size * (1 - t*0.6), this.size * (1 - t*0.6), 0, 0, Math.PI*2); ctx.fillStyle = "white"; // white particles ctx.fill(); ctx.globalAlpha = 1; }
 }
 const particles = [];
-const PARTICLE_MAX = 600; // global cap for performance
+const PARTICLE_MAX = 120; // drastically reduced max particles // global cap for performance
 
 function spawnFootParticles(px, py, vx, vy, isRunning, world, count = 6){
   // px,py world pos; vx,vy movement direction (normalized) - if zero provide fallback
@@ -469,4 +469,3 @@ window.addEventListener('resize', ()=>{ resizeCanvas(); });
 </script>
 </body>
 </html>
-
