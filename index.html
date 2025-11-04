@@ -328,26 +328,28 @@ class Player{
     // exhaustion flag: becomes true only if stamina reaches 0 while running.
     // While exhausted is true, sprinting is disabled until stamina regenerates to 25%.
     this.exhausted = false;
-    this.img = new Image(); this.imgLoaded = false; // we'll set image from preloader later
+    this.img = new Image(); this.imgLoaded = false;
     this.worldSize = TILE * 0.5; this.radius = Math.max(4, this.worldSize * 0.45);
     this._stepAcc = 0;
+
+    // animation (per-direction 2 frames)
+    this.animMap = { down: [null,null], up:[null,null], left:[null,null], right:[null,null] };
+    this.direction = 'down'; // 'up','down','left','right'
+    this.frameIndex = 0;
+    this.frameTimer = 0;
+    this.frameInterval = 0.45; // seconds between frames
+    this.lastDirection = 'down';
   }
   update(dt,input,world,camera,canvas, particleSystem){
     let vx=0,vy=0; if(input.isDown('w')||input.isDown('arrowup')) vy -= 1; if(input.isDown('s')||input.isDown('arrowdown')) vy += 1; if(input.isDown('a')||input.isDown('arrowleft')) vx -= 1; if(input.isDown('d')||input.isDown('arrowright')) vx += 1; const mag=Math.hypot(vx,vy); if(mag>0){ vx/=mag; vy/=mag; }
 
     // ---------- Run/Exhaustion logic (fixed) ----------
-    // Desired sprint input:
     const wantRun = input.isDown('shift');
-
-    // Determine whether sprinting is allowed this frame:
-    // - If exhausted (stamina hit 0 previously), sprinting is disabled until stamina >= 25% of max.
-    // - Otherwise sprinting is allowed as long as there's > 0 stamina and player is holding shift.
     let canRun = false;
     if(wantRun){
       if(this.exhausted){
         canRun = false;
       } else {
-        // allow running while stamina > 0 (drain will reach 0 and then set exhausted)
         canRun = this.stamina > 0;
       }
     } else {
@@ -380,40 +382,55 @@ class Player{
     if(!collidesCircle(this.x, ny, this.radius)) this.y = ny;
 
     // ---------- Stamina update ----------
-    // We only drain stamina when we are actually running AND moving.
     const isMoving = (vx !== 0 || vy !== 0);
     const willDrain = this.running && isMoving;
 
     if(willDrain){
       this.stamina -= STAMINA_DRAIN_PER_SEC * dt;
-      // If we hit zero while draining, clamp and set exhausted state.
       if(this.stamina <= 0){
         this.stamina = 0;
-        // Only set exhausted when stamina actually ran out (used fully).
         this.exhausted = true;
-        // Immediately stop running — player can't sprint once exhausted.
         this.running = false;
       }
     } else {
-      // Recover stamina when not actively draining.
       this.stamina += STAMINA_RECOVER_PER_SEC * dt;
       if(this.stamina > STAMINA_MAX) this.stamina = STAMINA_MAX;
-
-      // If we were exhausted, only remove the exhausted lock when stamina reaches 25% of max.
       if(this.exhausted && this.stamina >= STAMINA_MAX * 0.25){
         this.exhausted = false;
-        // Note: sprint will only resume if player is still holding shift next frames.
       }
     }
 
     // Update UI stamina text
     const sEl = document.getElementById('staminaVal'); if(sEl) sEl.textContent = Math.round(this.stamina);
 
-    const mw = camera.screenToWorld(input.mouse.x, input.mouse.y);
-    this.angle = Math.atan2(mw.y - this.y, mw.x - this.x);
+    // --- NEW: determine facing direction from movement (not mouse) ---
+    if(isMoving){
+      // pick primary axis
+      if(Math.abs(vx) > Math.abs(vy)){
+        this.direction = vx > 0 ? 'right' : 'left';
+      } else {
+        this.direction = vy > 0 ? 'down' : 'up';
+      }
+      this.lastDirection = this.direction;
+    } else {
+      // keep lastDirection when idle
+      this.direction = this.lastDirection;
+    }
 
-    // particles on movement
-    const moving = (vx !== 0 || vy !== 0);
+    // --- NEW: animation timer (only animate while moving) ---
+    if(isMoving){
+      this.frameTimer += dt;
+      while(this.frameTimer >= this.frameInterval){
+        this.frameTimer -= this.frameInterval;
+        this.frameIndex = 1 - this.frameIndex;
+      }
+    } else {
+      this.frameIndex = 0; // idle uses first frame
+      this.frameTimer = 0;
+    }
+
+    // existing particle movement code
+    const moving = isMoving;
     if(moving){
       const spawnRate = this.running ? 0.020 : 0.055;
       this._stepAcc += dt;
@@ -450,9 +467,25 @@ class Player{
       this._stepAcc = Math.max(0, this._stepAcc - dt*2);
     }
   }
+
   draw(ctx){
-    ctx.save(); ctx.translate(this.x, this.y); const drawRot = this.angle + Math.PI/2; ctx.rotate(drawRot);
-    if(this.imgLoaded && this.img && this.img.complete){ ctx.imageSmoothingEnabled = false; const w = this.worldSize, h = this.worldSize; ctx.drawImage(this.img, -w/2, -h/2, w, h); } else { ctx.fillStyle='#ffd8a8'; ctx.fillRect(-this.worldSize/4, -this.worldSize/4, this.worldSize/2, this.worldSize/2); }
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
+
+    // Draw the appropriate animation frame for direction
+    const map = this.animMap && this.animMap[this.direction] ? this.animMap[this.direction] : null;
+    const img = map ? map[this.frameIndex] || map[0] : null;
+    const w = this.worldSize, h = this.worldSize;
+
+    if(img && img.complete){
+      ctx.translate(this.x, this.y);
+      // No rotation — sprites are already facing the correct direction
+      ctx.drawImage(img, -w/2, -h/2, w, h);
+    } else {
+      // fallback: simple square
+      ctx.translate(this.x, this.y);
+      ctx.fillStyle='#ffd8a8'; ctx.fillRect(-this.worldSize/4, -this.worldSize/4, this.worldSize/2, this.worldSize/2);
+    }
     ctx.restore();
   }
 }
@@ -502,6 +535,17 @@ function drawStaminaBar(){ const bar=document.getElementById('stamina'); if(!bar
 function loopUISync(){ drawStaminaBar(); requestAnimationFrame(loopUISync); }
 
 // -------------------- Loading / Preloader --------------------
+// NOTE: include the per-direction player sprites (exact filenames)
+const assetPaths = [
+  'Loading.png',
+  'Tree.png',
+  'Rock1.png','Rock2.png','Rock3.png',
+  'Player1Down.png','Player2Down.png',
+  'Player1Up.png','Player2Up.png',
+  'Player1Right.png','Player2Right.png',
+  'Player1Left.png','Player2Left.png'
+];
+
 function loadAssets(paths, onProgress, onComplete){
   const total = paths.length;
   let loaded = 0;
@@ -514,9 +558,6 @@ function loadAssets(paths, onProgress, onComplete){
     img.src = p;
   });
 }
-
-// assets to wait for (include Loading.png so the overlay image is guaranteed ready)
-const assetPaths = ['Loading.png','Tree.png','Rock1.png','Rock2.png','Rock3.png','Player.png'];
 
 const progressBarInner = document.getElementById('progressBarInner');
 const progressText = document.getElementById('progressText');
@@ -587,13 +628,18 @@ function startGame(){
   particleSystem = new ParticleSystem(120);
   player = new Player(spawn.x, spawn.y);
 
-  // attach preloaded player image if available
-  if(imagesByPath['Player.png']) {
-    player.img = imagesByPath['Player.png'];
-    player.imgLoaded = !!player.img.complete;
-  } else {
-    // fallback: keep default (will draw placeholder)
+  // attach animation frames to player (if available)
+  function imgOrNull(name){
+    return (imagesByPath[name] && imagesByPath[name].complete) ? imagesByPath[name] : null;
   }
+  player.animMap.down[0] = imgOrNull('Player1Down.png');
+  player.animMap.down[1] = imgOrNull('Player2Down.png');
+  player.animMap.up[0] = imgOrNull('Player1Up.png');
+  player.animMap.up[1] = imgOrNull('Player2Up.png');
+  player.animMap.right[0] = imgOrNull('Player1Right.png');
+  player.animMap.right[1] = imgOrNull('Player2Right.png');
+  player.animMap.left[0] = imgOrNull('Player1Left.png');
+  player.animMap.left[1] = imgOrNull('Player2Left.png');
 
   // ensure treeImg / rockImgs variables are set (already set in loader)
   if(imagesByPath['Tree.png']) treeImg = imagesByPath['Tree.png'];
