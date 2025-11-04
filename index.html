@@ -253,8 +253,6 @@ class Camera{ constructor(x=0,y=0,scale=CAMERA_DEFAULT){ this.x=x; this.y=y; thi
 const STAMINA_MAX = 100;
 const STAMINA_DRAIN_PER_SEC = 25;
 const STAMINA_RECOVER_PER_SEC = 5;
-// threshold (25% of max) for coming out of exhaustion after fully depleting stamina
-const STAMINA_EXHAUSTION_THRESHOLD = STAMINA_MAX * 0.25;
 
 // ---------- Tree image + per-pixel mask ----------
 const treeImg = new Image();
@@ -350,24 +348,10 @@ class Player{
     this.worldSize = TILE * 0.5; this.radius = Math.max(4, this.worldSize * 0.45);
     // particle stepping
     this._stepAcc = 0; // accumulates time to spawn step particles
-
-    // NEW: exhaustion flag — when stamina reaches exactly 0 due to sprinting,
-    // player cannot sprint again until stamina regenerates above STAMINA_EXHAUSTION_THRESHOLD.
-    this.isExhausted = false;
   }
   update(dt,input,world,camera,canvas){
     let vx=0,vy=0; if(input.isDown('w')||input.isDown('arrowup')) vy -= 1; if(input.isDown('s')||input.isDown('arrowdown')) vy += 1; if(input.isDown('a')||input.isDown('arrowleft')) vx -= 1; if(input.isDown('d')||input.isDown('arrowright')) vx += 1; const mag=Math.hypot(vx,vy); if(mag>0){ vx/=mag; vy/=mag; }
-
-    // NOTE: running only allowed when:
-    // - player holds shift (wantRun)
-    // - player is moving
-    // - player is NOT exhausted (exhaustion only occurs when stamina hit 0)
-    // - player has stamina > 0
-    const wantRun = input.isDown('shift');
-    const moving = (vx !== 0 || vy !== 0);
-    const attemptRun = wantRun && moving && !this.isExhausted && this.stamina > 0;
-    this.running = attemptRun;
-    const speed = this.baseSpeed * (this.running ? this.runMultiplier : 1);
+    const wantRun = input.isDown('shift'); const canRun = wantRun && this.stamina > 1; this.running = canRun; const speed = this.baseSpeed * (this.running ? this.runMultiplier : 1);
     const nx = this.x + vx*speed*dt; const ny = this.y + vy*speed*dt;
     this.radius = Math.max(4, this.worldSize * 0.45);
 
@@ -391,36 +375,17 @@ class Player{
     if(!collidesCircle(nx, this.y, this.radius)) this.x = nx;
     if(!collidesCircle(this.x, ny, this.radius)) this.y = ny;
 
-    // ---------- STAMINA: drain/recover + exhaustion handling ----------
-    if(this.running){
-      // drain while running
-      this.stamina -= STAMINA_DRAIN_PER_SEC * dt;
-      if(this.stamina <= 0){
-        // Fully depleted -> enter exhaustion state
-        this.stamina = 0;
-        this.isExhausted = true;
-        // Immediately stop running (prevents running on tiny fractional stamina)
-        this.running = false;
-      }
-    } else {
-      // recover when not running (or if movement but not running)
-      this.stamina += STAMINA_RECOVER_PER_SEC * dt;
-      // If we were exhausted, un-exhaust only when stamina reaches the 25% threshold
-      if(this.isExhausted && this.stamina >= STAMINA_EXHAUSTION_THRESHOLD){
-        this.isExhausted = false;
-      }
-      if(this.stamina > STAMINA_MAX) this.stamina = STAMINA_MAX;
-    }
-
-    // Update UI text (rounded)
+    // stamina
+    if(this.running && (vx!==0 || vy!==0)){
+      this.stamina -= STAMINA_DRAIN_PER_SEC * dt; if(this.stamina < 0) this.stamina = 0;
+    } else { this.stamina += STAMINA_RECOVER_PER_SEC * dt; if(this.stamina > STAMINA_MAX) this.stamina = STAMINA_MAX; }
     const sEl = document.getElementById('staminaVal'); if(sEl) sEl.textContent = Math.round(this.stamina);
-
     const mw = camera.screenToWorld(input.mouse.x, input.mouse.y);
     this.angle = Math.atan2(mw.y - this.y, mw.x - this.x);
 
     // --- particles on movement (1x1 world pixels; lightweight)
-    const movingNow = (vx !== 0 || vy !== 0);
-    if(movingNow){
+    const moving = (vx !== 0 || vy !== 0);
+    if(moving){
       // control spawn rate: running spawns more frequently but still modest
       const spawnRate = this.running ? 0.020 : 0.055; // seconds per particle (smaller -> more particles). keep small numbers to ensure few particles
       this._stepAcc += dt;
