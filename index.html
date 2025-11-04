@@ -63,6 +63,10 @@ const TILE = 44;
 const MAP_W = 640, MAP_H = 640;
 let DPR = window.devicePixelRatio || 1;
 
+// === PLAYER SIZE CONFIG ===
+// Change this value to scale the player's world size (easy tweak as requested)
+const PLAYER_WORLD_SIZE = TILE * 0.5; // <-- change this to make player larger/smaller
+
 const GRASS_VARIANTS = 4;
 const TILE_GRASS_BASE = 0;
 const TILE_DIRT = GRASS_VARIANTS;
@@ -288,6 +292,10 @@ const STAMINA_RECOVER_PER_SEC = 5;
 
 // ---------- Tree per-pixel mask helper (will be built after tree image loads) ----------
 let treeMask = null; let treeImgW = 0, treeImgH = 0;
+// Tree sprite world size (used for per-pixel mask scaling). Adjust if your Tree.png size differs.
+let TREE_WORLD_SIZE = TILE * 1.75; // world units
+let TREE_RADIUS = TREE_WORLD_SIZE * 0.45;
+
 function buildTreeMaskFromImage(treeImg){
   treeImgW = treeImg.width; treeImgH = treeImg.height;
   const c = document.createElement('canvas'); c.width = treeImgW; c.height = treeImgH; const cc = c.getContext('2d'); cc.imageSmoothingEnabled=false; cc.clearRect(0,0,c.width,c.height); cc.drawImage(treeImg,0,0);
@@ -324,21 +332,25 @@ class ParticleSystem {
 // ---------- Player (collides with per-pixel tree masks) ----------
 class Player{
   constructor(x,y){
-    this.x=x; this.y=y; this.baseSpeed=100; this.runMultiplier=1.8; this.angle=0; this.stamina=STAMINA_MAX; this.running=false;
-    // exhaustion flag: becomes true only if stamina reaches 0 while running.
-    // While exhausted is true, sprinting is disabled until stamina regenerates to 25%.
+    this.x=x; this.y=y;
+    this.baseSpeed=100; this.runMultiplier=1.8;
+    this.angle=0; this.stamina=STAMINA_MAX; this.running=false;
     this.exhausted = false;
-    this.img = new Image(); this.imgLoaded = false;
-    this.worldSize = TILE * 0.5; this.radius = Math.max(4, this.worldSize * 0.45);
+    this.img = null; this.imgLoaded = false;
+    // use global player size by default (easy to tweak)
+    this.worldSize = PLAYER_WORLD_SIZE;
+    this.radius = Math.max(4, this.worldSize * 0.45);
     this._stepAcc = 0;
 
-    // animation (per-direction 2 frames)
-    this.animMap = { down: [null,null], up:[null,null], left:[null,null], right:[null,null] };
+    // animation (per-direction 2 frames). We will only load right-facing frames and mirror them for left.
+    this.animMap = { down: [null,null], up:[null,null], right:[null,null] };
+    this.idleImg = null;
     this.direction = 'down'; // 'up','down','left','right'
+    this.lastDirection = 'down';
     this.frameIndex = 0;
     this.frameTimer = 0;
-    this.frameInterval = 0.45; // seconds between frames
-    this.lastDirection = 'down';
+    this.frameIntervalBase = 0.45; // base seconds between frames
+    this.isMoving = false;
   }
   update(dt,input,world,camera,canvas, particleSystem){
     let vx=0,vy=0; if(input.isDown('w')||input.isDown('arrowup')) vy -= 1; if(input.isDown('s')||input.isDown('arrowdown')) vy += 1; if(input.isDown('a')||input.isDown('arrowleft')) vx -= 1; if(input.isDown('d')||input.isDown('arrowright')) vx += 1; const mag=Math.hypot(vx,vy); if(mag>0){ vx/=mag; vy/=mag; }
@@ -382,8 +394,8 @@ class Player{
     if(!collidesCircle(this.x, ny, this.radius)) this.y = ny;
 
     // ---------- Stamina update ----------
-    const isMoving = (vx !== 0 || vy !== 0);
-    const willDrain = this.running && isMoving;
+    this.isMoving = (vx !== 0 || vy !== 0);
+    const willDrain = this.running && this.isMoving;
 
     if(willDrain){
       this.stamina -= STAMINA_DRAIN_PER_SEC * dt;
@@ -404,8 +416,7 @@ class Player{
     const sEl = document.getElementById('staminaVal'); if(sEl) sEl.textContent = Math.round(this.stamina);
 
     // --- NEW: determine facing direction from movement (not mouse) ---
-    if(isMoving){
-      // pick primary axis
+    if(this.isMoving){
       if(Math.abs(vx) > Math.abs(vy)){
         this.direction = vx > 0 ? 'right' : 'left';
       } else {
@@ -413,25 +424,25 @@ class Player{
       }
       this.lastDirection = this.direction;
     } else {
-      // keep lastDirection when idle
       this.direction = this.lastDirection;
     }
 
-    // --- NEW: animation timer (only animate while moving) ---
-    if(isMoving){
+    // --- NEW: animation timer (frame interval speeds up when sprinting) ---
+    const interval = this.running ? (this.frameIntervalBase / this.runMultiplier) : this.frameIntervalBase;
+    if(this.isMoving){
       this.frameTimer += dt;
-      while(this.frameTimer >= this.frameInterval){
-        this.frameTimer -= this.frameInterval;
+      while(this.frameTimer >= interval){
+        this.frameTimer -= interval;
         this.frameIndex = 1 - this.frameIndex;
       }
     } else {
-      this.frameIndex = 0; // idle uses first frame
+      // idle: show idle sprite if available, otherwise first directional frame
+      this.frameIndex = 0;
       this.frameTimer = 0;
     }
 
     // existing particle movement code
-    const moving = isMoving;
-    if(moving){
+    if(this.isMoving){
       const spawnRate = this.running ? 0.020 : 0.055;
       this._stepAcc += dt;
       while(this._stepAcc >= spawnRate){
@@ -472,20 +483,43 @@ class Player{
     ctx.save();
     ctx.imageSmoothingEnabled = false;
 
-    // Draw the appropriate animation frame for direction
-    const map = this.animMap && this.animMap[this.direction] ? this.animMap[this.direction] : null;
-    const img = map ? map[this.frameIndex] || map[0] : null;
     const w = this.worldSize, h = this.worldSize;
 
-    if(img && img.complete){
+    // If idle and idle image exists -> draw it
+    if(!this.isMoving && this.idleImg && this.idleImg.complete){
       ctx.translate(this.x, this.y);
-      // No rotation — sprites are already facing the correct direction
-      ctx.drawImage(img, -w/2, -h/2, w, h);
-    } else {
-      // fallback: simple square
-      ctx.translate(this.x, this.y);
-      ctx.fillStyle='#ffd8a8'; ctx.fillRect(-this.worldSize/4, -this.worldSize/4, this.worldSize/2, this.worldSize/2);
+      ctx.drawImage(this.idleImg, -w/2, -h/2, w, h);
+      ctx.restore();
+      return;
     }
+
+    // choose frame based on direction. Left uses right frames mirrored.
+    let img = null;
+    if(this.direction === 'left'){
+      // use right frames mirrored
+      const rightMap = this.animMap.right;
+      img = rightMap ? (rightMap[this.frameIndex] || rightMap[0]) : null;
+      if(img && img.complete){
+        ctx.translate(this.x, this.y);
+        ctx.scale(-1,1); // mirror horizontally
+        ctx.drawImage(img, -w/2, -h/2, w, h);
+        ctx.restore();
+        return;
+      }
+    } else {
+      const map = (this.direction === 'right') ? this.animMap.right : (this.direction === 'down' ? this.animMap.down : this.animMap.up);
+      img = map ? (map[this.frameIndex] || map[0]) : null;
+      if(img && img.complete){
+        ctx.translate(this.x, this.y);
+        ctx.drawImage(img, -w/2, -h/2, w, h);
+        ctx.restore();
+        return;
+      }
+    }
+
+    // fallback - draw simple placeholder
+    ctx.translate(this.x, this.y);
+    ctx.fillStyle='#ffd8a8'; ctx.fillRect(-this.worldSize/4, -this.worldSize/4, this.worldSize/2, this.worldSize/2);
     ctx.restore();
   }
 }
@@ -523,8 +557,6 @@ function circleVsTreeMask(circleX, circleY, circleR, treeCenterX, treeCenterY){
 
 // ---------- Variables that will be created at start ----------
 let atlasSmall, world, particleSystem, player, camera, input;
-let TREE_WORLD_SIZE = TILE * 1.75; // world units
-let TREE_RADIUS = TREE_WORLD_SIZE * 0.45;
 let ROCK_BASE_WORLD_SIZE = TILE * 0.24;
 let treeImg = null;
 let rockImgs = [];
@@ -535,7 +567,7 @@ function drawStaminaBar(){ const bar=document.getElementById('stamina'); if(!bar
 function loopUISync(){ drawStaminaBar(); requestAnimationFrame(loopUISync); }
 
 // -------------------- Loading / Preloader --------------------
-// NOTE: include the per-direction player sprites (exact filenames)
+// assets to wait for (include Loading.png so the overlay image is guaranteed ready)
 const assetPaths = [
   'Loading.png',
   'Tree.png',
@@ -543,7 +575,7 @@ const assetPaths = [
   'Player1Down.png','Player2Down.png',
   'Player1Up.png','Player2Up.png',
   'Player1Right.png','Player2Right.png',
-  'Player1Left.png','Player2Left.png'
+  'IdlePlayer.png' // optional idle sprite
 ];
 
 function loadAssets(paths, onProgress, onComplete){
@@ -628,22 +660,23 @@ function startGame(){
   particleSystem = new ParticleSystem(120);
   player = new Player(spawn.x, spawn.y);
 
-  // attach animation frames to player (if available)
-  function imgOrNull(name){
-    return (imagesByPath[name] && imagesByPath[name].complete) ? imagesByPath[name] : null;
-  }
+  // attach animation frames to player (prefer right-facing frames; left will be mirrored)
+  function imgOrNull(name){ return (imagesByPath[name] && imagesByPath[name].complete) ? imagesByPath[name] : null; }
   player.animMap.down[0] = imgOrNull('Player1Down.png');
   player.animMap.down[1] = imgOrNull('Player2Down.png');
   player.animMap.up[0] = imgOrNull('Player1Up.png');
   player.animMap.up[1] = imgOrNull('Player2Up.png');
   player.animMap.right[0] = imgOrNull('Player1Right.png');
   player.animMap.right[1] = imgOrNull('Player2Right.png');
-  player.animMap.left[0] = imgOrNull('Player1Left.png');
-  player.animMap.left[1] = imgOrNull('Player2Left.png');
+  player.idleImg = imgOrNull('IdlePlayer.png');
 
   // ensure treeImg / rockImgs variables are set (already set in loader)
   if(imagesByPath['Tree.png']) treeImg = imagesByPath['Tree.png'];
   rockImgs = [ imagesByPath['Rock1.png'], imagesByPath['Rock2.png'], imagesByPath['Rock3.png'] ];
+
+  // use global player size in case user changed PLAYER_WORLD_SIZE
+  player.worldSize = PLAYER_WORLD_SIZE;
+  player.radius = Math.max(4, player.worldSize * 0.45);
 
   const cameraStart = new Camera(player.x, player.y, CAMERA_DEFAULT);
   camera = cameraStart;
