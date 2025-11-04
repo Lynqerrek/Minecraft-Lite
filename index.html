@@ -324,7 +324,7 @@ class ParticleSystem {
 // ---------- Player (collides with per-pixel tree masks) ----------
 class Player{
   constructor(x,y){
-    this.x=x; this.y=y; this.baseSpeed=140; this.runMultiplier=1.9; this.angle=0; this.stamina=STAMINA_MAX; this.running=false;
+    this.x=x; this.y=y; this.baseSpeed=75; this.runMultiplier=3.0; this.angle=0; this.stamina=STAMINA_MAX; this.running=false;
     // exhaustion flag: becomes true only if stamina reaches 0 while running.
     // While exhausted is true, sprinting is disabled until stamina regenerates to 25%.
     this.exhausted = false;
