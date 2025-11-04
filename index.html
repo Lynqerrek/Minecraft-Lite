@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>MineLite</title>
+  <title>MineLite — Pixel-perfect player collisions (union mask)</title>
   <style>
     html,body{height:100%;margin:0;background:#0b1220;color:#ddd;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;overflow:hidden}
     canvas{display:block}
@@ -11,32 +11,18 @@
     .title{font-weight:700;margin-bottom:6px}
     .hint{opacity:.9}
     .stamina{position:fixed;left:12px;bottom:12px;padding:6px;background:rgba(0,0,0,0.32);border-radius:8px;color:#fff;font-family:monospace;pointer-events:none;transform-origin:0 0}
-
-    /* Loading overlay */
-    #loadingOverlay {
-      position:fixed;
-      inset:0;
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      flex-direction:column;
-      background:linear-gradient(180deg, rgba(6,8,12,0.98) 0%, rgba(4,6,10,0.98) 100%);
-      z-index:9999;
-      transition:opacity .45s ease, visibility .45s ease;
-    }
+    #loadingOverlay { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column; background:linear-gradient(180deg, rgba(6,8,12,0.98) 0%, rgba(4,6,10,0.98) 100%); z-index:9999; transition:opacity .45s ease, visibility .45s ease; }
     #loadingOverlay.hidden { opacity:0; visibility:hidden; pointer-events:none; }
     #loadingBox { text-align:center; color:#fff; transform:translateY(0); }
     #loadingBox img { max-width:360px; width:40vmin; height:auto; image-rendering:pixelated; display:block; margin:0 auto 18px; }
     #progressWrap { width: min(520px, 80vw); background: rgba(255,255,255,0.06); border-radius:10px; padding:8px; box-sizing:border-box; }
     #progressBar { width:100%; height:12px; background:rgba(0,0,0,0.24); border-radius:8px; overflow:hidden; }
     #progressBarInner { width:0%; height:100%; background: linear-gradient(90deg,#9be15d,#27ae60); transition:width .18s linear; }
-    #progressText { margin-top:8px; font-size:13px; opacity:0.95; }
   </style>
 </head>
 <body>
   <canvas id="game"></canvas>
 
-  <!-- Loading overlay (will be hidden when assets loaded) -->
   <div id="loadingOverlay">
     <div id="loadingBox">
       <img id="loadingImg" src="Loading.png" alt="Loading">
@@ -52,20 +38,16 @@
     <div><strong>Controls</strong></div>
     <div class="hint">WASD / Arrows — move</div>
     <div class="hint">Hold Shift — run (uses stamina)</div>
-    <div class="hint">Mouse — aim</div>
+    <div class="hint">Mouse — aim (not used for facing)</div>
     <div class="hint">Scroll — zoom (Ctrl+Scroll disabled)</div>
   </div>
   <div id="stamina" class="stamina">Stamina: <span id="staminaVal">100</span></div>
 
 <script>
-// ---------- Config / helpers ----------
+// ========== CONFIG ==========
 const TILE = 44;
 const MAP_W = 640, MAP_H = 640;
 let DPR = window.devicePixelRatio || 1;
-
-// === PLAYER SIZE CONFIG ===
-// Change this value to scale the player's world size (easy tweak as requested)
-const PLAYER_WORLD_SIZE = TILE * 0.85; // <-- change this to make player larger/smaller
 
 const GRASS_VARIANTS = 4;
 const TILE_GRASS_BASE = 0;
@@ -78,6 +60,17 @@ const ZOOM_IN_MAX = 5;
 const ZOOM_OUT_MIN = ZOOM_IN_MAX / 2;
 const CAMERA_DEFAULT = (ZOOM_IN_MAX + ZOOM_OUT_MIN) / 1.6;
 
+// --- PLAYER SIZE (make player 2x bigger)
+const PLAYER_WORLD_SIZE = TILE * 1.0; // original was TILE*0.5 — set to 1.0 for 2× bigger
+
+// --- animation timings
+const FRAME_INTERVAL_BASE = 0.45; // seconds per frame normally
+// stamina/sprint
+const STAMINA_MAX = 100;
+const STAMINA_DRAIN_PER_SEC = 12.5;
+const STAMINA_RECOVER_PER_SEC = 5;
+
+// ========== HELPERS ==========
 function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
 function lerp(a,b,t){ return a + (b-a)*t; }
 function makeSeededRandom(seed){ let s = seed>>>0; return function(){ s = (s + 0x6D2B79F5) | 0; let t = Math.imul(s ^ s>>>15, 1 | s); t = (t + Math.imul(t ^ t>>>7, 61 | t)) ^ t; return ((t ^ t>>>14) >>> 0) / 4294967296; } }
@@ -85,11 +78,10 @@ function smoothstep(a){ return a*a*(3-2*a); }
 function valueNoise2D(x,y,seed){ const xf=Math.floor(x), yf=Math.floor(y); const rx=x-xf, ry=y-yf; const u=smoothstep(rx), v=smoothstep(ry); const r00 = makeSeededRandom(((xf*73856093) ^ (yf*19349663) ^ seed)>>>0)(); const r10 = makeSeededRandom((((xf+1)*73856093) ^ (yf*19349663) ^ seed)>>>0)(); const r01 = makeSeededRandom(((xf*73856093) ^ ((yf+1)*19349663) ^ seed)>>>0)(); const r11 = makeSeededRandom((((xf+1)*73856093) ^ ((yf+1)*19349663) ^ seed)>>>0)(); const xa = r00*(1-u) + r10*u; const xb = r01*(1-u) + r11*u; return xa*(1-v) + xb*v; }
 function octaveNoise(x,y,seed,oct=4,scale=1){ let amp=1,freq=1,sum=0,tot=0; for(let i=0;i<oct;i++){ sum += valueNoise2D(x*freq/scale, y*freq/scale, seed + i*1000) * amp; tot += amp; amp *= 0.5; freq *= 2; } return sum/tot; }
 
-// ---------- Canvas + DPI + UI scaling ----------
+// ========== CANVAS & UI ==========
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
-let canvasW = 0, canvasH = 0;
-let uiScale = DPR;
+let canvasW=0, canvasH=0, uiScale = DPR;
 
 function resizeCanvas(){
   DPR = window.devicePixelRatio || 1;
@@ -108,11 +100,9 @@ function resizeCanvas(){
 }
 window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
-window.addEventListener('wheel', function(e){ if(e.ctrlKey){ e.preventDefault(); } }, {passive:false});
-window.addEventListener('gesturestart', e=>{ e.preventDefault(); }, {passive:false});
 function styleHUD(){ const hud=document.getElementById('hud'), st=document.getElementById('stamina'); if(hud) hud.style.transform=`scale(${uiScale})`; if(st) st.style.transform=`scale(${uiScale})`; }
 
-// ---------- Pixelate existing atlas (small-scale -> nearest upscale) ----------
+// ========== TILE ATLAS (pixelated) ==========
 function createPixelatedTileAtlas(blockSize = 8){
   const off = document.createElement('canvas');
   off.width = (GRASS_VARIANTS + 2) * TILE;
@@ -144,7 +134,7 @@ function createPixelatedTileAtlas(blockSize = 8){
   return small;
 }
 
-// ---------- World generation + store tree & rock entities ----------
+// ========== WORLD (unchanged) ==========
 class World {
   constructor(w,h){
     this.w=w; this.h=h;
@@ -156,7 +146,7 @@ class World {
     this.rockVariant = new Uint8Array(w*h);
     this.rockScale = new Float32Array(w*h);
     this.treeAnchor = new Uint8Array(w*h);
-    this.trees = []; // list of {anchorX,anchorY, cx, cy}
+    this.trees = [];
     this.seed = Math.floor(Math.random()*1e9);
     this.generate();
   }
@@ -204,13 +194,12 @@ class World {
           }
         }
         if(this.objects[i] === OBJ_NONE && placeRnd() < 0.025){
-          // make rock variant + random scale per rock (no collision)
           this.objects[i] = OBJ_ROCK;
           const maxOff = TILE*0.36;
           this.rockOffsetX[i] = (placeRnd()*2-1)*maxOff;
           this.rockOffsetY[i] = (placeRnd()*2-1)*maxOff;
-          this.rockVariant[i] = Math.floor(placeRnd()*3); // 0,1,2 -> Rock1..Rock3
-          this.rockScale[i] = 0.6 + placeRnd() * 0.9; // between 0.6 and 1.5
+          this.rockVariant[i] = Math.floor(placeRnd()*3);
+          this.rockScale[i] = 0.6 + placeRnd() * 0.9;
         }
       }
     }
@@ -218,7 +207,6 @@ class World {
 
   findSafeSpawn(){ const cx = Math.floor(this.w/2), cy = Math.floor(this.h/2); const maxR = Math.max(this.w,this.h); for(let r=0;r<maxR;r++){ for(let dy=-r; dy<=r; dy++){ for(let dx=-r; dx<=r; dx++){ const x = cx + dx, y = cy + dy; if(!this.inBounds(x,y)) continue; const i=this.idx(x,y); if(this.tiles[i] === TILE_WATER) continue; if(this.objects[i] === OBJ_TREE) continue; let blocked=false; for(let yy=y-1; yy<=y+1; yy++) for(let xx=x-1; xx<=x+1; xx++){ if(!this.inBounds(xx,yy)){ blocked=true; break; } const idx2=this.idx(xx,yy); if(this.tiles[idx2] === TILE_WATER) blocked=true; if(this.objects[idx2] === OBJ_TREE) blocked=true; } if(blocked) continue; return {x: x*TILE + TILE/2, y: y*TILE + TILE/2}; } } } return {x: cx*TILE + TILE/2, y: cy*TILE + TILE/2}; }
 
-  // draw tiles from SMALL atlas so they look blocky internally (no grid lines)
   draw(ctx, camera, canvas, atlasSmall, treeImg, treeWorldSize, rockImgs, rockBaseWorldSize){
     const left = Math.max(0, Math.floor((camera.x - (canvasW/2)/camera.scale)/TILE) - 1);
     const right = Math.min(this.w-1, Math.ceil((camera.x + (canvasW/2)/camera.scale)/TILE) + 1);
@@ -235,7 +223,6 @@ class World {
       }
     }
 
-    // draw rocks using rockImgs and per-rock scale & variant (no collision)
     if(rockImgs && rockImgs.length > 0){
       ctx.imageSmoothingEnabled = false;
       for(let yy=top; yy<=bottom; yy++){
@@ -248,17 +235,15 @@ class World {
             const scale = this.rockScale[i] || 1.0;
             const img = rockImgs[variant];
             if(img && img.complete){
-              const worldSize = rockBaseWorldSize * scale; // world units
+              const worldSize = rockBaseWorldSize * scale;
               ctx.drawImage(img, cx - worldSize/2, cy - worldSize/2, worldSize, worldSize);
             } else {
-              // fallback: simple rock drawing
               drawRock(ctx, xx*TILE + TILE/2, yy*TILE + TILE/2);
             }
           }
         }
       }
     } else {
-      // no rock images loaded: draw old style rocks
       for(let yy=top; yy<=bottom; yy++){
         for(let xx=left; xx<=right; xx++){
           const i = this.idx(xx,yy); const o = this.objects[i];
@@ -267,7 +252,6 @@ class World {
       }
     }
 
-    // draw trees using the stored entities (this.trees)
     if(treeImg && treeImg.complete){
       ctx.imageSmoothingEnabled = false;
       for(const t of this.trees){
@@ -277,25 +261,16 @@ class World {
     }
   }
 }
-
 function drawRock(ctx,cx,cy){ ctx.save(); ctx.translate(cx,cy); ctx.beginPath(); ctx.ellipse(0,0,6,5,0,0,Math.PI*2); ctx.fillStyle='#6b665b'; ctx.fill(); ctx.strokeStyle='rgba(0,0,0,0.25)'; ctx.stroke(); ctx.restore(); }
 
-// ---------- Input + Camera ----------
+// ========== INPUT & CAMERA ==========
 class Input{ constructor(canvas){ this.keys={}; this.mouse={x:0,worldX:0,y:0,worldY:0}; canvas.addEventListener('mousemove', e=>{ const r=canvas.getBoundingClientRect(); this.mouse.x = e.clientX - r.left; this.mouse.y = e.clientY - r.top; }); canvas.addEventListener('wheel', e=>{ e.preventDefault(); if(!e.ctrlKey) camera.targetScale = clamp(camera.targetScale * (1 - e.deltaY * 0.0012), ZOOM_OUT_MIN, ZOOM_IN_MAX); }, {passive:false}); window.addEventListener('keydown', e=>{ this.keys[e.key.toLowerCase()] = true; }); window.addEventListener('keyup', e=>{ this.keys[e.key.toLowerCase()] = false; }); } isDown(k){ return !!this.keys[k.toLowerCase()]; } }
-
 class Camera{ constructor(x=0,y=0,scale=CAMERA_DEFAULT){ this.x=x; this.y=y; this.scale=scale; this.targetScale=scale; this.smooth=0.12; this.zoomSmooth=0.12; } update(dt,tx,ty){ this.x = lerp(this.x, tx, this.smooth); this.y = lerp(this.y, ty, this.smooth); this.scale = lerp(this.scale, this.targetScale, this.zoomSmooth); } screenToWorld(sx,sy){ const wx = (sx - canvasW/2)/this.scale + this.x; const wy = (sy - canvasH/2)/this.scale + this.y; return {x:wx,y:wy}; } }
 
-// ---------- Stamina ----------
-const STAMINA_MAX = 100;
-const STAMINA_DRAIN_PER_SEC = 12.5;
-const STAMINA_RECOVER_PER_SEC = 5;
-
-// ---------- Tree per-pixel mask helper (will be built after tree image loads) ----------
+// ========== TREE MASK (unchanged) ==========
 let treeMask = null; let treeImgW = 0, treeImgH = 0;
-// Tree sprite world size (used for per-pixel mask scaling). Adjust if your Tree.png size differs.
-let TREE_WORLD_SIZE = TILE * 1.75; // world units
+let TREE_WORLD_SIZE = TILE * 1.75; // adjust if Tree.png world size differs
 let TREE_RADIUS = TREE_WORLD_SIZE * 0.45;
-
 function buildTreeMaskFromImage(treeImg){
   treeImgW = treeImg.width; treeImgH = treeImg.height;
   const c = document.createElement('canvas'); c.width = treeImgW; c.height = treeImgH; const cc = c.getContext('2d'); cc.imageSmoothingEnabled=false; cc.clearRect(0,0,c.width,c.height); cc.drawImage(treeImg,0,0);
@@ -305,98 +280,75 @@ function buildTreeMaskFromImage(treeImg){
   console.log('Tree mask built', treeImgW+'x'+treeImgH);
 }
 
-// ---------- Particle system (1x1 world pixel particles, capped and lightweight) ----------
-class Particle {
-  constructor(){ this.alive = false; }
-  init(x,y,vx,vy,life,color){ this.x=x; this.y=y; this.vx=vx; this.vy=vy; this.life=life; this.maxLife=life; this.color=color; this.alive=true; }
-  update(dt){ if(!this.alive) return; this.life -= dt; if(this.life <= 0){ this.alive = false; return; } this.vy += 80 * dt; // gravity tiny
-    this.x += this.vx * dt; this.y += this.vy * dt; }
-  draw(ctx){ if(!this.alive) return;
-    ctx.globalAlpha = 1;
-    ctx.fillStyle = this.color;
-    ctx.fillRect(Math.round(this.x), Math.round(this.y), 1, 1);
-    ctx.globalAlpha = 1;
-  }
-}
+// ========== PARTICLES ==========
+class Particle { constructor(){ this.alive = false; } init(x,y,vx,vy,life,color){ this.x=x; this.y=y; this.vx=vx; this.vy=vy; this.life=life; this.maxLife=life; this.color=color; this.alive=true; } update(dt){ if(!this.alive) return; this.life -= dt; if(this.life <= 0){ this.alive = false; return; } this.vy += 80 * dt; this.x += this.vx * dt; this.y += this.vy * dt; } draw(ctx){ if(!this.alive) return; ctx.globalAlpha = 1; ctx.fillStyle = this.color; ctx.fillRect(Math.round(this.x), Math.round(this.y), 1, 1); ctx.globalAlpha = 1; } }
+class ParticleSystem { constructor(maxParticles=55){ this.max = maxParticles; this.pool = new Array(this.max); for(let i=0;i<this.max;i++) this.pool[i] = new Particle(); } spawn(x,y,vx,vy,life,color){ for(let i=0;i<this.max;i++){ const p=this.pool[i]; if(!p.alive){ p.init(x,y,vx,vy,life,color); return; } } let bestIdx=0, bestLife=1e9; for(let i=0;i<this.max;i++){ if(this.pool[i].life < bestLife){ bestLife = this.pool[i].life; bestIdx = i; } } this.pool[bestIdx].init(x,y,vx,vy,life,color); } update(dt){ for(const p of this.pool) if(p.alive) p.update(dt); } draw(ctx){ for(const p of this.pool) if(p.alive) p.draw(ctx); } }
 
-class ParticleSystem {
-  constructor(maxParticles=55){ this.max = maxParticles; this.pool = new Array(this.max); for(let i=0;i<this.max;i++) this.pool[i] = new Particle(); }
-  spawn(x,y,vx,vy,life,color){ for(let i=0;i<this.max;i++){ const p=this.pool[i]; if(!p.alive){ p.init(x,y,vx,vy,life,color); return; } }
-    let bestIdx=0, bestLife=1e9; for(let i=0;i<this.max;i++){ if(this.pool[i].life < bestLife){ bestLife = this.pool[i].life; bestIdx = i; } }
-    this.pool[bestIdx].init(x,y,vx,vy,life,color);
-  }
-  update(dt){ for(const p of this.pool) if(p.alive) p.update(dt); }
-  draw(ctx){ for(const p of this.pool) if(p.alive) p.draw(ctx); }
-}
-
-// ---------- Player (collides with per-pixel tree masks) ----------
-class Player{
+// ========== PLAYER (with union mask collision) ==========
+class Player {
   constructor(x,y){
-    this.x=x; this.y=y;
-    this.baseSpeed=100; this.runMultiplier=1.8;
-    this.angle=0; this.stamina=STAMINA_MAX; this.running=false;
-    this.exhausted = false;
-    this.img = null; this.imgLoaded = false;
-    // use global player size by default (easy to tweak)
+    this.x = x; this.y = y;
+    this.baseSpeed = 100; this.runMultiplier = 1.8;
+    this.stamina = STAMINA_MAX; this.running=false; this.exhausted=false;
     this.worldSize = PLAYER_WORLD_SIZE;
     this.radius = Math.max(4, this.worldSize * 0.45);
     this._stepAcc = 0;
 
-    // animation (per-direction 2 frames). We will only load right-facing frames and mirror them for left.
-    this.animMap = { down: [null,null], up:[null,null], right:[null,null] };
+    // animation frames (we use right frames and mirror to left)
+    this.animMap = { down: [null,null], up: [null,null], right: [null,null] };
     this.idleImg = null;
-    this.direction = 'down'; // 'up','down','left','right'
+
+    // animation state
+    this.direction = 'down'; // up/down/left/right
     this.lastDirection = 'down';
     this.frameIndex = 0;
     this.frameTimer = 0;
-    this.frameIntervalBase = 0.45; // base seconds between frames
+    this.frameIntervalBase = FRAME_INTERVAL_BASE;
     this.isMoving = false;
-  }
-  update(dt,input,world,camera,canvas, particleSystem){
-    let vx=0,vy=0; if(input.isDown('w')||input.isDown('arrowup')) vy -= 1; if(input.isDown('s')||input.isDown('arrowdown')) vy += 1; if(input.isDown('a')||input.isDown('arrowleft')) vx -= 1; if(input.isDown('d')||input.isDown('arrowright')) vx += 1; const mag=Math.hypot(vx,vy); if(mag>0){ vx/=mag; vy/=mag; }
 
-    // ---------- Run/Exhaustion logic (fixed) ----------
+    // masks
+    // frameMasks still kept, but for collisions we will build a combinedMask (union of all frames)
+    this.frameMasks = {};
+    this.combinedMask = null; // {mask:Uint8Array, w, h}
+  }
+
+  // update per-frame, handles input, movement and stamina & collisions
+  update(dt, input, world, camera, canvas, particleSystem){
+    // input
+    let vx=0, vy=0;
+    if(input.isDown('w')||input.isDown('arrowup')) vy -= 1;
+    if(input.isDown('s')||input.isDown('arrowdown')) vy += 1;
+    if(input.isDown('a')||input.isDown('arrowleft')) vx -= 1;
+    if(input.isDown('d')||input.isDown('arrowright')) vx += 1;
+    const mag = Math.hypot(vx,vy);
+    if(mag>0){ vx/=mag; vy/=mag; }
+
+    // running logic
     const wantRun = input.isDown('shift');
     let canRun = false;
     if(wantRun){
-      if(this.exhausted){
-        canRun = false;
-      } else {
-        canRun = this.stamina > 0;
-      }
-    } else {
-      canRun = false;
-    }
+      if(this.exhausted) canRun = false;
+      else canRun = this.stamina > 0;
+    } else canRun = false;
     this.running = canRun;
 
     const speed = this.baseSpeed * (this.running ? this.runMultiplier : 1);
-    const nx = this.x + vx*speed*dt; const ny = this.y + vy*speed*dt;
+    const nx = this.x + vx * speed * dt;
+    const ny = this.y + vy * speed * dt;
     this.radius = Math.max(4, this.worldSize * 0.45);
 
-    const collidesCircle = (cx,cy,r) => {
-      const tx0 = Math.floor((cx - r) / TILE), tx1 = Math.floor((cx + r) / TILE);
-      const ty0 = Math.floor((cy - r) / TILE), ty1 = Math.floor((cy + r + r) / TILE);
-      for(let ty=ty0; ty<=ty1; ty++){
-        for(let tx=tx0; tx<=tx1; tx++){
-          if(!world.inBounds(tx,ty)) continue;
-          const tile = world.getTile(tx,ty);
-          if(tile === TILE_WATER){ if(circleRectIntersect(cx,cy,r, tx*TILE, ty*TILE, TILE, TILE)) return true; }
-        }
-      }
-      for(const t of world.trees){
-        const dx = t.cx - cx, dy = t.cy - cy; const maxDist = r + Math.sqrt(2)*(TREE_WORLD_SIZE/2);
-        if(dx*dx + dy*dy > maxDist*maxDist) continue;
-        if(circleVsTreeMask(cx, cy, r, t.cx, t.cy)) return true;
-      }
-      return false;
+    // collision test using pixel-perfect union mask (with fallback to circle)
+    const collidesAt = (cx, cy) => {
+      return this._collidesPixelUnion(cx, cy, world);
     };
-    if(!collidesCircle(nx, this.y, this.radius)) this.x = nx;
-    if(!collidesCircle(this.x, ny, this.radius)) this.y = ny;
 
-    // ---------- Stamina update ----------
+    // attempt move X / Y separately
+    if(!collidesAt(nx, this.y)) this.x = nx;
+    if(!collidesAt(this.x, ny)) this.y = ny;
+
+    // stamina update
     this.isMoving = (vx !== 0 || vy !== 0);
     const willDrain = this.running && this.isMoving;
-
     if(willDrain){
       this.stamina -= STAMINA_DRAIN_PER_SEC * dt;
       if(this.stamina <= 0){
@@ -407,27 +359,20 @@ class Player{
     } else {
       this.stamina += STAMINA_RECOVER_PER_SEC * dt;
       if(this.stamina > STAMINA_MAX) this.stamina = STAMINA_MAX;
-      if(this.exhausted && this.stamina >= STAMINA_MAX * 0.25){
-        this.exhausted = false;
-      }
+      if(this.exhausted && this.stamina >= STAMINA_MAX * 0.25) this.exhausted = false;
     }
-
-    // Update UI stamina text
     const sEl = document.getElementById('staminaVal'); if(sEl) sEl.textContent = Math.round(this.stamina);
 
-    // --- NEW: determine facing direction from movement (not mouse) ---
+    // determine facing from movement (not mouse)
     if(this.isMoving){
-      if(Math.abs(vx) > Math.abs(vy)){
-        this.direction = vx > 0 ? 'right' : 'left';
-      } else {
-        this.direction = vy > 0 ? 'down' : 'up';
-      }
+      if(Math.abs(vx) > Math.abs(vy)) this.direction = vx > 0 ? 'right' : 'left';
+      else this.direction = vy > 0 ? 'down' : 'up';
       this.lastDirection = this.direction;
     } else {
       this.direction = this.lastDirection;
     }
 
-    // --- NEW: animation timer (frame interval speeds up when sprinting) ---
+    // animation timer (speeds up while sprinting)
     const interval = this.running ? (this.frameIntervalBase / this.runMultiplier) : this.frameIntervalBase;
     if(this.isMoving){
       this.frameTimer += dt;
@@ -436,12 +381,11 @@ class Player{
         this.frameIndex = 1 - this.frameIndex;
       }
     } else {
-      // idle: show idle sprite if available, otherwise first directional frame
       this.frameIndex = 0;
       this.frameTimer = 0;
     }
 
-    // existing particle movement code
+    // particles on movement (unchanged)
     if(this.isMoving){
       const spawnRate = this.running ? 0.020 : 0.055;
       this._stepAcc += dt;
@@ -465,11 +409,8 @@ class Player{
           const gv = world.grassVariant[world.idx(tx,ty)] || 0;
           const grassPalette = ['#7cc85b','#6fb23a','#8bdc66','#5fb03a'];
           color = grassPalette[gv] || '#8bd26a';
-        } else if(tileUnder === TILE_DIRT) {
-          color = '#9f6b3a';
-        } else if(tileUnder === TILE_WATER) {
-          color = '#6fc3ff';
-        }
+        } else if(tileUnder === TILE_DIRT) color = '#9f6b3a';
+        else if(tileUnder === TILE_WATER) color = '#6fc3ff';
 
         const life = this.running ? 0.35 + Math.random()*0.2 : 0.6 + Math.random()*0.4;
         particleSystem.spawn(px, py, pvx, pvy, life, color);
@@ -479,32 +420,27 @@ class Player{
     }
   }
 
+  // draw player using current frame, mirroring right->left
   draw(ctx){
     ctx.save();
     ctx.imageSmoothingEnabled = false;
-
     const w = this.worldSize, h = this.worldSize;
 
-    // If idle and idle image exists -> draw it
+    // idle draws idle image if available
     if(!this.isMoving && this.idleImg && this.idleImg.complete){
-      ctx.translate(this.x, this.y);
-      ctx.drawImage(this.idleImg, -w/2, -h/2, w, h);
-      ctx.restore();
-      return;
+      ctx.translate(this.x, this.y); ctx.drawImage(this.idleImg, -w/2, -h/2, w, h); ctx.restore(); return;
     }
 
-    // choose frame based on direction. Left uses right frames mirrored.
+    // pick frame image
     let img = null;
     if(this.direction === 'left'){
-      // use right frames mirrored
       const rightMap = this.animMap.right;
       img = rightMap ? (rightMap[this.frameIndex] || rightMap[0]) : null;
       if(img && img.complete){
         ctx.translate(this.x, this.y);
-        ctx.scale(-1,1); // mirror horizontally
+        ctx.scale(-1,1);
         ctx.drawImage(img, -w/2, -h/2, w, h);
-        ctx.restore();
-        return;
+        ctx.restore(); return;
       }
     } else {
       const map = (this.direction === 'right') ? this.animMap.right : (this.direction === 'down' ? this.animMap.down : this.animMap.up);
@@ -512,23 +448,191 @@ class Player{
       if(img && img.complete){
         ctx.translate(this.x, this.y);
         ctx.drawImage(img, -w/2, -h/2, w, h);
-        ctx.restore();
-        return;
+        ctx.restore(); return;
       }
     }
 
-    // fallback - draw simple placeholder
+    // fallback placeholder
     ctx.translate(this.x, this.y);
     ctx.fillStyle='#ffd8a8'; ctx.fillRect(-this.worldSize/4, -this.worldSize/4, this.worldSize/2, this.worldSize/2);
     ctx.restore();
   }
+
+  // ---------- PIXEL-COLLISION: combined (union) mask logic ----------
+  // Build a combined (union) mask from all player images (frames + idle). Called once after images loaded.
+  buildCombinedMaskFromImages(){
+    // gather available images in an array (draw each onto an offscreen canvas and union alpha)
+    const imgs = [];
+    const pushIf = (i) => { if(i && i.complete) imgs.push(i); };
+    pushIf(this.animMap.down[0]); pushIf(this.animMap.down[1]);
+    pushIf(this.animMap.up[0]); pushIf(this.animMap.up[1]);
+    pushIf(this.animMap.right[0]); pushIf(this.animMap.right[1]);
+    pushIf(this.idleImg);
+    // Right frames also mirrored for left: we want them included in the union as mirrored versions
+    // but it's equivalent to union of right frames and their mirrored counterparts.
+    if(imgs.length === 0){ this.combinedMask = null; return; }
+
+    // Determine base width/height (prefer first image)
+    const baseW = imgs[0].width, baseH = imgs[0].height;
+
+    // Use offscreen canvas sized to baseW/baseH and draw each image onto it then read alpha
+    const off = document.createElement('canvas'); off.width = baseW; off.height = baseH;
+    const oc = off.getContext('2d');
+    oc.imageSmoothingEnabled = false;
+
+    // create union boolean array
+    const union = new Uint8Array(baseW * baseH);
+
+    // helper to draw image scaled to base size (should be same size already)
+    const drawAndOr = (image, flipH=false) => {
+      oc.clearRect(0,0,off.width,off.height);
+      oc.save();
+      if(flipH){
+        oc.translate(off.width,0); oc.scale(-1,1);
+        oc.drawImage(image, 0, 0, off.width, off.height);
+      } else {
+        oc.drawImage(image, 0, 0, off.width, off.height);
+      }
+      oc.restore();
+      const id = oc.getImageData(0,0,off.width,off.height).data;
+      for(let y=0;y<off.height;y++){
+        for(let x=0;x<off.width;x++){
+          const a = id[(y*off.width + x)*4 + 3];
+          if(a > 128) union[y*off.width + x] = 1;
+        }
+      }
+    };
+
+    // draw each provided image normally
+    for(const im of imgs) drawAndOr(im, false);
+
+    // include mirrored right frames if present (so union includes left-facing shapes)
+    const r0 = this.animMap.right[0], r1 = this.animMap.right[1];
+    if(r0 && r0.complete) drawAndOr(r0, true);
+    if(r1 && r1.complete) drawAndOr(r1, true);
+
+    // store combined mask (mask pixels correspond to image pixels; mapping to world uses player.worldSize)
+    this.combinedMask = { mask: union, w: baseW, h: baseH };
+    console.log('Player combined mask built', baseW+'x'+baseH);
+  }
+
+  // Test collisions using combinedMask union (pixel-perfect) vs water tiles and tree masks.
+  // Falls back to circle checks if combinedMask is not available.
+  _collidesPixelUnion(cx, cy, world){
+    // fallback: if no combinedMask or treeMask present, use circle fallback
+    if(!this.combinedMask){
+      const r = this.radius;
+      const tx0 = Math.floor((cx - r) / TILE), tx1 = Math.floor((cx + r) / TILE);
+      const ty0 = Math.floor((cy - r) / TILE), ty1 = Math.floor((cy + r + r) / TILE);
+      for(let ty=ty0; ty<=ty1; ty++){
+        for(let tx=tx0; tx<=tx1; tx++){
+          if(!world.inBounds(tx,ty)) continue;
+          const tile = world.getTile(tx,ty);
+          if(tile === TILE_WATER){ if(circleRectIntersect(cx,cy,r, tx*TILE, ty*TILE, TILE, TILE)) return true; }
+        }
+      }
+      for(const t of world.trees){
+        const dx = t.cx - cx, dy = t.cy - cy; const maxDist = r + Math.sqrt(2)*(TREE_WORLD_SIZE/2);
+        if(dx*dx + dy*dy > maxDist*maxDist) continue;
+        if(circleVsTreeMask(cx, cy, r, t.cx, t.cy)) return true;
+      }
+      return false;
+    }
+
+    const cm = this.combinedMask;
+    const pw = cm.w, ph = cm.h, pm = cm.mask;
+    const half = this.worldSize / 2;
+
+    // helper: check whether player's mask overlaps an arbitrary rectangle [rectX,rectY,rectW,rectH] in world coords
+    function maskIntersectsRect(rectX, rectY, rectW, rectH, cx_local, cy_local, worldSize){
+      const left_world = cx_local - worldSize/2;
+      const top_world = cy_local - worldSize/2;
+      const pxPerWorld = pw / worldSize;
+      const ix0 = Math.max(0, Math.floor((rectX - left_world) * pxPerWorld));
+      const iy0 = Math.max(0, Math.floor((rectY - top_world) * pxPerWorld));
+      const ix1 = Math.min(pw - 1, Math.ceil(((rectX + rectW) - left_world) * pxPerWorld) - 1);
+      const iy1 = Math.min(ph - 1, Math.ceil(((rectY + rectH) - top_world) * pxPerWorld) - 1);
+      if(ix1 < ix0 || iy1 < iy0) return false;
+      for(let yy=iy0; yy<=iy1; yy++){
+        for(let xx=ix0; xx<=ix1; xx++){
+          if(pm[yy*pw + xx]) return true;
+        }
+      }
+      return false;
+    }
+
+    // 1) Water tiles: for every overlapping tile, if player's mask overlaps tile rect => collision
+    const playerLeft = cx - half, playerTop = cy - half, playerRight = cx + half, playerBottom = cy + half;
+    const tx0 = Math.floor(playerLeft / TILE), tx1 = Math.floor(playerRight / TILE);
+    const ty0 = Math.floor(playerTop / TILE), ty1 = Math.floor(playerBottom / TILE);
+    for(let ty=ty0; ty<=ty1; ty++){
+      for(let tx=tx0; tx<=tx1; tx++){
+        if(!world.inBounds(tx,ty)) continue;
+        const tile = world.getTile(tx,ty);
+        if(tile === TILE_WATER){
+          const rectX = tx * TILE, rectY = ty * TILE;
+          if(maskIntersectsRect(rectX, rectY, TILE, TILE, cx, cy, this.worldSize)) return true;
+        }
+      }
+    }
+
+    // 2) Trees: for each nearby tree, test pixel overlap between player combined mask and treeMask
+    if(treeMask && treeImgW > 0){
+      for(const t of world.trees){
+        const treeLeft = t.cx - TREE_WORLD_SIZE/2, treeTop = t.cy - TREE_WORLD_SIZE/2;
+        const treeRight = t.cx + TREE_WORLD_SIZE/2, treeBottom = t.cy + TREE_WORLD_SIZE/2;
+        // broad-phase AABB
+        if(treeRight < playerLeft || treeLeft > playerRight || treeBottom < playerTop || treeTop > playerBottom) continue;
+
+        // overlap region
+        const ox0 = Math.max(playerLeft, treeLeft);
+        const oy0 = Math.max(playerTop, treeTop);
+        const ox1 = Math.min(playerRight, treeRight);
+        const oy1 = Math.min(playerBottom, treeBottom);
+        if(ox1 <= ox0 || oy1 <= oy0) continue;
+
+        // map overlap to player mask pixels
+        const pxPerWorld_player = pw / this.worldSize;
+        const p_ix0 = Math.max(0, Math.floor((ox0 - (cx - this.worldSize/2)) * pxPerWorld_player));
+        const p_iy0 = Math.max(0, Math.floor((oy0 - (cy - this.worldSize/2)) * pxPerWorld_player));
+        const p_ix1 = Math.min(pw-1, Math.ceil((ox1 - (cx - this.worldSize/2)) * pxPerWorld_player) - 1);
+        const p_iy1 = Math.min(ph-1, Math.ceil((oy1 - (cy - this.worldSize/2)) * pxPerWorld_player) - 1);
+
+        // map overlap to treeMask pixels
+        const pxPerWorld_tree = treeImgW / TREE_WORLD_SIZE;
+        const t_ix0 = Math.max(0, Math.floor((ox0 - (t.cx - TREE_WORLD_SIZE/2)) * pxPerWorld_tree));
+        const t_iy0 = Math.max(0, Math.floor((oy0 - (t.cy - TREE_WORLD_SIZE/2)) * pxPerWorld_tree));
+        const t_ix1 = Math.min(treeImgW-1, Math.ceil((ox1 - (t.cx - TREE_WORLD_SIZE/2)) * pxPerWorld_tree) - 1);
+        const t_iy1 = Math.min(treeImgH-1, Math.ceil((oy1 - (t.cy - TREE_WORLD_SIZE/2)) * pxPerWorld_tree) - 1);
+
+        if(p_ix1 < p_ix0 || p_iy1 < p_iy0 || t_ix1 < t_ix0 || t_iy1 < t_iy0) continue;
+
+        // iterate over overlap and check if both masks have opaque pixel
+        // compute scaling offsets to iterate in sync
+        const p_w = p_ix1 - p_ix0 + 1;
+        const p_h = p_iy1 - p_iy0 + 1;
+        // choose iteration resolution as the smaller of both extents to avoid gaps
+        const stepX = 1, stepY = 1;
+        for(let py = 0; py < p_h; py++){
+          for(let px = 0; px < p_w; px++){
+            const pxx = p_ix0 + px;
+            const pyy = p_iy0 + py;
+            const txx = t_ix0 + px;
+            const tyy = t_iy0 + py;
+            if(pxx < 0 || pxx >= pw || pyy < 0 || pyy >= ph) continue;
+            if(txx < 0 || txx >= treeImgW || tyy < 0 || tyy >= treeImgH) continue;
+            if(pm[pyy*pw + pxx] && treeMask[tyy*treeImgW + txx]) return true;
+          }
+        }
+      }
+    }
+
+    return false;
+  }
 }
 
-// Collision helpers (kept unchanged)
+// ========== Collision helpers (fallbacks) ==========
 function circleRectIntersect(cx,cy,r, rx,ry,rw,rh){ const closestX = Math.max(rx, Math.min(cx, rx+rw)); const closestY = Math.max(ry, Math.min(cy, ry+rh)); const dx = cx - closestX, dy = cy - closestY; return (dx*dx + dy*dy) <= r*r; }
-function circleCircleIntersect(x1,y1,r1, x2,y2,r2){ const dx=x1-x2, dy=y1-y2; const d2=dx*dx+dy*dy; return d2 <= (r1+r2)*(r1+r2); }
-
-// per-pixel circle vs tree mask. returns true if any opaque pixel intersects circle
 function circleVsTreeMask(circleX, circleY, circleR, treeCenterX, treeCenterY){
   if(!treeMask || treeImgW === 0) return false;
   const left_world = treeCenterX - TREE_WORLD_SIZE/2;
@@ -555,19 +659,17 @@ function circleVsTreeMask(circleX, circleY, circleR, treeCenterX, treeCenterY){
   return false;
 }
 
-// ---------- Variables that will be created at start ----------
+// ========== GLOBALS & ASSET LOADER ==========
 let atlasSmall, world, particleSystem, player, camera, input;
 let ROCK_BASE_WORLD_SIZE = TILE * 0.24;
 let treeImg = null;
 let rockImgs = [];
 let imagesByPath = {};
 
-// ---------- UI: stamina ----------
 function drawStaminaBar(){ const bar=document.getElementById('stamina'); if(!bar) return; const pct=player.stamina/STAMINA_MAX; const w=160,h=10,inner=Math.round(pct*w); bar.innerHTML = `Stamina: <span id="staminaVal">${Math.round(player.stamina)}</span>\n    <div style="margin-top:6px;background:rgba(255,255,255,0.08);width:${w}px;height:${h}px;border-radius:6px;overflow:hidden">\n      <div style="width:${inner}px;height:${h}px;background:linear-gradient(90deg,#9be15d,#27ae60);"></div>\n    </div>`; }
 function loopUISync(){ drawStaminaBar(); requestAnimationFrame(loopUISync); }
 
-// -------------------- Loading / Preloader --------------------
-// assets to wait for (include Loading.png so the overlay image is guaranteed ready)
+// asset list (must match user files)
 const assetPaths = [
   'Loading.png',
   'Tree.png',
@@ -575,7 +677,7 @@ const assetPaths = [
   'Player1Down.png','Player2Down.png',
   'Player1Up.png','Player2Up.png',
   'Player1Right.png','Player2Right.png',
-  'IdlePlayer.png' // optional idle sprite
+  'IdlePlayer.png' // optional
 ];
 
 function loadAssets(paths, onProgress, onComplete){
@@ -600,21 +702,14 @@ loadAssets(assetPaths, (loaded, total) => {
   progressBarInner.style.width = pct + '%';
   progressText.textContent = `Loading — ${pct}%`;
 }, (loadedImages) => {
-  // store images
   imagesByPath = loadedImages;
-  // build tree mask from loaded tree image (if present)
-  if(imagesByPath['Tree.png'] && imagesByPath['Tree.png'].complete) {
-    treeImg = imagesByPath['Tree.png'];
-    buildTreeMaskFromImage(treeImg);
-  }
-  // build rock array
+  if(imagesByPath['Tree.png'] && imagesByPath['Tree.png'].complete){ treeImg = imagesByPath['Tree.png']; buildTreeMaskFromImage(treeImg); }
   rockImgs = [ imagesByPath['Rock1.png'], imagesByPath['Rock2.png'], imagesByPath['Rock3.png'] ];
-  // fade out overlay then start game
   loadingOverlay.classList.add('hidden');
-  setTimeout(startGame, 480); // short delay to finish fade
+  setTimeout(startGame, 480);
 });
 
-// -------------------- Game loop + render (will be started by startGame) --------------------
+// ========== GAME LOOP & RENDER ==========
 let last = 0;
 function gameLoop(now){
   if(!last) last = now;
@@ -630,17 +725,18 @@ function gameLoop(now){
 
 function render(dt){
   ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0, canvas.width, canvas.height);
-  const S = camera.scale * DPR; const tx = canvasW * DPR / 2 - camera.x * camera.scale * DPR; const ty = canvasH * DPR / 2 - camera.y * camera.scale * DPR;
+  const S = camera.scale * DPR;
+  const tx = canvasW * DPR / 2 - camera.x * camera.scale * DPR;
+  const ty = canvasH * DPR / 2 - camera.y * camera.scale * DPR;
   ctx.setTransform(S, 0, 0, S, tx, ty);
   ctx.imageSmoothingEnabled = false;
 
   world.draw(ctx, camera, canvas, atlasSmall, treeImg, TREE_WORLD_SIZE, rockImgs, ROCK_BASE_WORLD_SIZE);
-
   particleSystem.update(dt);
   particleSystem.draw(ctx);
-
   player.draw(ctx);
 
+  // faint grid
   ctx.save(); ctx.globalAlpha = 0.02; ctx.lineWidth = 1 / S; ctx.strokeStyle = '#000';
   const left = Math.floor((camera.x - (canvasW/2)/camera.scale)/TILE) - 1;
   const right = Math.ceil((camera.x + (canvasW/2)/camera.scale)/TILE) + 1;
@@ -651,16 +747,15 @@ function render(dt){
   ctx.restore();
 }
 
-// -------------------- Start game after assets loaded --------------------
+// ========== START GAME (wires everything up) ==========
 function startGame(){
-  // create small atlas, world and other instances
   atlasSmall = createPixelatedTileAtlas(8);
   world = new World(MAP_W, MAP_H);
   const spawn = world.findSafeSpawn();
   particleSystem = new ParticleSystem(120);
   player = new Player(spawn.x, spawn.y);
 
-  // attach animation frames to player (prefer right-facing frames; left will be mirrored)
+  // attach images (anim frames)
   function imgOrNull(name){ return (imagesByPath[name] && imagesByPath[name].complete) ? imagesByPath[name] : null; }
   player.animMap.down[0] = imgOrNull('Player1Down.png');
   player.animMap.down[1] = imgOrNull('Player2Down.png');
@@ -670,25 +765,24 @@ function startGame(){
   player.animMap.right[1] = imgOrNull('Player2Right.png');
   player.idleImg = imgOrNull('IdlePlayer.png');
 
-  // ensure treeImg / rockImgs variables are set (already set in loader)
   if(imagesByPath['Tree.png']) treeImg = imagesByPath['Tree.png'];
   rockImgs = [ imagesByPath['Rock1.png'], imagesByPath['Rock2.png'], imagesByPath['Rock3.png'] ];
 
-  // use global player size in case user changed PLAYER_WORLD_SIZE
+  // set player size from constant
   player.worldSize = PLAYER_WORLD_SIZE;
   player.radius = Math.max(4, player.worldSize * 0.45);
 
-  const cameraStart = new Camera(player.x, player.y, CAMERA_DEFAULT);
-  camera = cameraStart;
+  // build combined (union) mask for pixel-perfect collisions
+  player.buildCombinedMaskFromImages();
+
+  camera = new Camera(player.x, player.y, CAMERA_DEFAULT);
   input = new Input(canvas);
 
-  // start UI loop + game loop
   requestAnimationFrame(loopUISync);
   last = performance.now();
   requestAnimationFrame(gameLoop);
 }
 
-// -------------------- small helpers --------------------
 window.addEventListener('resize', ()=>{ resizeCanvas(); });
 
 </script>
