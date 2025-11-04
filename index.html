@@ -11,42 +11,10 @@
     .title{font-weight:700;margin-bottom:6px}
     .hint{opacity:.9}
     .stamina{position:fixed;left:12px;bottom:12px;padding:6px;background:rgba(0,0,0,0.32);border-radius:8px;color:#fff;font-family:monospace;pointer-events:none;transform-origin:0 0}
-
-    /* Loading overlay */
-    #loadingOverlay {
-      position:fixed;
-      inset:0;
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      flex-direction:column;
-      background:linear-gradient(180deg, rgba(6,8,12,0.98) 0%, rgba(4,6,10,0.98) 100%);
-      z-index:9999;
-      transition:opacity .45s ease, visibility .45s ease;
-    }
-    #loadingOverlay.hidden { opacity:0; visibility:hidden; pointer-events:none; }
-    #loadingBox { text-align:center; color:#fff; transform:translateY(0); }
-    #loadingBox img { max-width:360px; width:40vmin; height:auto; image-rendering:pixelated; display:block; margin:0 auto 18px; }
-    #progressWrap { width: min(520px, 80vw); background: rgba(255,255,255,0.06); border-radius:10px; padding:8px; box-sizing:border-box; }
-    #progressBar { width:100%; height:12px; background:rgba(0,0,0,0.24); border-radius:8px; overflow:hidden; }
-    #progressBarInner { width:0%; height:100%; background: linear-gradient(90deg,#9be15d,#27ae60); transition:width .18s linear; }
-    #progressText { margin-top:8px; font-size:13px; opacity:0.95; }
   </style>
 </head>
 <body>
   <canvas id="game"></canvas>
-
-  <!-- Loading overlay (will be hidden when assets loaded) -->
-  <div id="loadingOverlay">
-    <div id="loadingBox">
-      <img id="loadingImg" src="Loading.png" alt="Loading">
-      <div id="progressWrap">
-        <div id="progressBar"><div id="progressBarInner"></div></div>
-        <div id="progressText">Loading — 0%</div>
-      </div>
-    </div>
-  </div>
-
   <div id="hud" class="hud">
     <div class="title">MineLite</div>
     <div><strong>Controls</strong></div>
@@ -286,129 +254,30 @@ const STAMINA_MAX = 100;
 const STAMINA_DRAIN_PER_SEC = 25;
 const STAMINA_RECOVER_PER_SEC = 5;
 
-// ---------- Tree per-pixel mask helper (will be built after tree image loads) ----------
+// ---------- Tree image + per-pixel mask ----------
+const treeImg = new Image();
+treeImg.src = 'Tree.png'; // 16x16 pixel-art tree
+let TREE_WORLD_SIZE = TILE * 1.75; // world units
+let TREE_RADIUS = TREE_WORLD_SIZE * 0.45;
 let treeMask = null; let treeImgW = 0, treeImgH = 0;
-function buildTreeMaskFromImage(treeImg){
-  treeImgW = treeImg.width; treeImgH = treeImg.height;
+treeImg.onload = () => {
+  treeImgW = treeImg.width; treeImgH = treeImg.height; TREE_RADIUS = TREE_WORLD_SIZE * 0.45;
   const c = document.createElement('canvas'); c.width = treeImgW; c.height = treeImgH; const cc = c.getContext('2d'); cc.imageSmoothingEnabled=false; cc.clearRect(0,0,c.width,c.height); cc.drawImage(treeImg,0,0);
   const id = cc.getImageData(0,0,c.width,c.height).data;
   treeMask = new Uint8Array(treeImgW * treeImgH);
   for(let y=0;y<treeImgH;y++){ for(let x=0;x<treeImgW;x++){ const idx=(y*c.width+x)*4+3; treeMask[y*c.width+x] = id[idx] > 128 ? 1 : 0; } }
-  console.log('Tree mask built', treeImgW+'x'+treeImgH);
+  console.log('Tree.png loaded', treeImgW+'x'+treeImgH, 'mask built');
+};
+
+// ---------- Rock images (variants) ----------
+const rockImgs = [];
+for(let i=1;i<=3;i++){
+  const r = new Image(); r.src = `Rock${i}.png`; r.onload = ()=>{ console.log(`Rock${i}.png loaded`, r.width+'x'+r.height); };
+  rockImgs.push(r);
 }
+const ROCK_BASE_WORLD_SIZE = TILE * 0.24; // base rock size in world units; individual rock scales multiply this
 
-// ---------- Particle system (1x1 world pixel particles, capped and lightweight) ----------
-class Particle {
-  constructor(){ this.alive = false; }
-  init(x,y,vx,vy,life,color){ this.x=x; this.y=y; this.vx=vx; this.vy=vy; this.life=life; this.maxLife=life; this.color=color; this.alive=true; }
-  update(dt){ if(!this.alive) return; this.life -= dt; if(this.life <= 0){ this.alive = false; return; } this.vy += 80 * dt; // gravity tiny
-    this.x += this.vx * dt; this.y += this.vy * dt; }
-  draw(ctx){ if(!this.alive) return;
-    ctx.globalAlpha = 1;
-    ctx.fillStyle = this.color;
-    ctx.fillRect(Math.round(this.x), Math.round(this.y), 1, 1);
-    ctx.globalAlpha = 1;
-  }
-}
-
-class ParticleSystem {
-  constructor(maxParticles=55){ this.max = maxParticles; this.pool = new Array(this.max); for(let i=0;i<this.max;i++) this.pool[i] = new Particle(); }
-  spawn(x,y,vx,vy,life,color){ for(let i=0;i<this.max;i++){ const p=this.pool[i]; if(!p.alive){ p.init(x,y,vx,vy,life,color); return; } }
-    let bestIdx=0, bestLife=1e9; for(let i=0;i<this.max;i++){ if(this.pool[i].life < bestLife){ bestLife = this.pool[i].life; bestIdx = i; } }
-    this.pool[bestIdx].init(x,y,vx,vy,life,color);
-  }
-  update(dt){ for(const p of this.pool) if(p.alive) p.update(dt); }
-  draw(ctx){ for(const p of this.pool) if(p.alive) p.draw(ctx); }
-}
-
-// ---------- Player (collides with per-pixel tree masks) ----------
-class Player{
-  constructor(x,y){
-    this.x=x; this.y=y; this.baseSpeed=140; this.runMultiplier=1.9; this.angle=0; this.stamina=STAMINA_MAX; this.running=false;
-    this.img = new Image(); this.imgLoaded = false; // we'll set image from preloader later
-    this.worldSize = TILE * 0.5; this.radius = Math.max(4, this.worldSize * 0.45);
-    this._stepAcc = 0;
-  }
-  update(dt,input,world,camera,canvas, particleSystem){
-    let vx=0,vy=0; if(input.isDown('w')||input.isDown('arrowup')) vy -= 1; if(input.isDown('s')||input.isDown('arrowdown')) vy += 1; if(input.isDown('a')||input.isDown('arrowleft')) vx -= 1; if(input.isDown('d')||input.isDown('arrowright')) vx += 1; const mag=Math.hypot(vx,vy); if(mag>0){ vx/=mag; vy/=mag; }
-    const wantRun = input.isDown('shift'); const canRun = wantRun && this.stamina > 1; this.running = canRun; const speed = this.baseSpeed * (this.running ? this.runMultiplier : 1);
-    const nx = this.x + vx*speed*dt; const ny = this.y + vy*speed*dt;
-    this.radius = Math.max(4, this.worldSize * 0.45);
-
-    const collidesCircle = (cx,cy,r) => {
-      const tx0 = Math.floor((cx - r) / TILE), tx1 = Math.floor((cx + r) / TILE);
-      const ty0 = Math.floor((cy - r) / TILE), ty1 = Math.floor((cy + r) / TILE);
-      for(let ty=ty0; ty<=ty1; ty++){
-        for(let tx=tx0; tx<=tx1; tx++){
-          if(!world.inBounds(tx,ty)) continue;
-          const tile = world.getTile(tx,ty);
-          if(tile === TILE_WATER){ if(circleRectIntersect(cx,cy,r, tx*TILE, ty*TILE, TILE, TILE)) return true; }
-        }
-      }
-      for(const t of world.trees){
-        const dx = t.cx - cx, dy = t.cy - cy; const maxDist = r + Math.sqrt(2)*(TREE_WORLD_SIZE/2);
-        if(dx*dx + dy*dy > maxDist*maxDist) continue;
-        if(circleVsTreeMask(cx, cy, r, t.cx, t.cy)) return true;
-      }
-      return false;
-    };
-    if(!collidesCircle(nx, this.y, this.radius)) this.x = nx;
-    if(!collidesCircle(this.x, ny, this.radius)) this.y = ny;
-
-    // stamina
-    if(this.running && (vx!==0 || vy!==0)){
-      this.stamina -= STAMINA_DRAIN_PER_SEC * dt; if(this.stamina < 0) this.stamina = 0;
-    } else { this.stamina += STAMINA_RECOVER_PER_SEC * dt; if(this.stamina > STAMINA_MAX) this.stamina = STAMINA_MAX; }
-    const sEl = document.getElementById('staminaVal'); if(sEl) sEl.textContent = Math.round(this.stamina);
-    const mw = camera.screenToWorld(input.mouse.x, input.mouse.y);
-    this.angle = Math.atan2(mw.y - this.y, mw.x - this.x);
-
-    // particles on movement
-    const moving = (vx !== 0 || vy !== 0);
-    if(moving){
-      const spawnRate = this.running ? 0.020 : 0.055;
-      this._stepAcc += dt;
-      while(this._stepAcc >= spawnRate){
-        this._stepAcc -= spawnRate;
-        const spread = this.running ? 6 : 3;
-        const backX = this.x - vx * (this.worldSize*0.5);
-        const backY = this.y - vy * (this.worldSize*0.5);
-        const ox = (Math.random()*2 - 1) * spread;
-        const oy = (Math.random()*2 - 1) * spread * 0.6;
-        const px = backX + ox;
-        const py = backY + oy + this.worldSize*0.25;
-        const speedMul = this.running ? 50 : 18;
-        const pvx = (-vx * (10 + Math.random()*speedMul)) + (Math.random()*20 - 10);
-        const pvy = (-vy * (6 + Math.random()*12)) + (Math.random()*6 - 3);
-
-        const tx = Math.floor(this.x / TILE), ty = Math.floor(this.y / TILE);
-        let color = '#c6b28a';
-        const tileUnder = world.getTile(tx,ty);
-        if(tileUnder >= TILE_GRASS_BASE && tileUnder < TILE_GRASS_BASE + GRASS_VARIANTS) {
-          const gv = world.grassVariant[world.idx(tx,ty)] || 0;
-          const grassPalette = ['#7cc85b','#6fb23a','#8bdc66','#5fb03a'];
-          color = grassPalette[gv] || '#8bd26a';
-        } else if(tileUnder === TILE_DIRT) {
-          color = '#9f6b3a';
-        } else if(tileUnder === TILE_WATER) {
-          color = '#6fc3ff';
-        }
-
-        const life = this.running ? 0.35 + Math.random()*0.2 : 0.6 + Math.random()*0.4;
-        particleSystem.spawn(px, py, pvx, pvy, life, color);
-      }
-    } else {
-      this._stepAcc = Math.max(0, this._stepAcc - dt*2);
-    }
-  }
-  draw(ctx){
-    ctx.save(); ctx.translate(this.x, this.y); const drawRot = this.angle + Math.PI/2; ctx.rotate(drawRot);
-    if(this.imgLoaded && this.img && this.img.complete){ ctx.imageSmoothingEnabled = false; const w = this.worldSize, h = this.worldSize; ctx.drawImage(this.img, -w/2, -h/2, w, h); } else { ctx.fillStyle='#ffd8a8'; ctx.fillRect(-this.worldSize/4, -this.worldSize/4, this.worldSize/2, this.worldSize/2); }
-    ctx.restore();
-  }
-}
-
-// Collision helpers (kept unchanged)
+// ---------- Collision helpers ----------
 function circleRectIntersect(cx,cy,r, rx,ry,rw,rh){ const closestX = Math.max(rx, Math.min(cx, rx+rw)); const closestY = Math.max(ry, Math.min(cy, ry+rh)); const dx = cx - closestX, dy = cy - closestY; return (dx*dx + dy*dy) <= r*r; }
 function circleCircleIntersect(x1,y1,r1, x2,y2,r2){ const dx=x1-x2, dy=y1-y2; const d2=dx*dx+dy*dy; return d2 <= (r1+r2)*(r1+r2); }
 
@@ -439,81 +308,189 @@ function circleVsTreeMask(circleX, circleY, circleR, treeCenterX, treeCenterY){
   return false;
 }
 
-// ---------- Variables that will be created at start ----------
-let atlasSmall, world, particleSystem, player, camera, input;
-let TREE_WORLD_SIZE = TILE * 1.75; // world units
-let TREE_RADIUS = TREE_WORLD_SIZE * 0.45;
-let ROCK_BASE_WORLD_SIZE = TILE * 0.24;
-let treeImg = null;
-let rockImgs = [];
-let imagesByPath = {};
+// ---------- Particle system (1x1 world pixel particles, capped and lightweight) ----------
+class Particle {
+  constructor(){ this.alive = false; }
+  init(x,y,vx,vy,life,color){ this.x=x; this.y=y; this.vx=vx; this.vy=vy; this.life=life; this.maxLife=life; this.color=color; this.alive=true; }
+  update(dt){ if(!this.alive) return; this.life -= dt; if(this.life <= 0){ this.alive = false; return; } this.vy += 80 * dt; // gravity tiny
+    this.x += this.vx * dt; this.y += this.vy * dt; }
+  draw(ctx){ if(!this.alive) return;
+    // draw as 1x1 world pixel so it's crisp and "cube'y" when scaled
+    // **MAKE OPAQUE**: do not scale alpha by life — draw fully opaque
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = this.color;
+    // draw exact 1x1 world unit square
+    ctx.fillRect(Math.round(this.x), Math.round(this.y), 1, 1);
+    ctx.globalAlpha = 1;
+  }
+}
 
-// ---------- UI: stamina ----------
+class ParticleSystem {
+  constructor(maxParticles=55){ this.max = maxParticles; this.pool = new Array(this.max); for(let i=0;i<this.max;i++) this.pool[i] = new Particle(); }
+  spawn(x,y,vx,vy,life,color){ // find free
+    for(let i=0;i<this.max;i++){ const p=this.pool[i]; if(!p.alive){ p.init(x,y,vx,vy,life,color); return; } }
+    // if full, replace a nearly-dead one (cheap)
+    let bestIdx=0, bestLife=1e9; for(let i=0;i<this.max;i++){ if(this.pool[i].life < bestLife){ bestLife = this.pool[i].life; bestIdx = i; } }
+    this.pool[bestIdx].init(x,y,vx,vy,life,color);
+  }
+  update(dt){ for(const p of this.pool) if(p.alive) p.update(dt); }
+  draw(ctx){ // draw behind player (call before drawing player for that effect)
+    // we intentionally do not sub-pixel blend to keep pixel-y look; we round positions when drawing
+    for(const p of this.pool) if(p.alive) p.draw(ctx);
+  }
+}
+
+// ---------- Player (collides with per-pixel tree masks) ----------
+class Player{
+  constructor(x,y){
+    this.x=x; this.y=y; this.baseSpeed=140; this.runMultiplier=1.9; this.angle=0;
+    this.stamina=STAMINA_MAX; this.running=false;
+    this.exhausted = false; // NEW: flag to lock sprint until full regen when stamina hit 0
+    this.img = new Image(); this.imgLoaded = false; this.img.src = 'Player.png'; this.img.onload = ()=>{ this.imgLoaded = true; };
+    this.worldSize = TILE * 0.5; this.radius = Math.max(4, this.worldSize * 0.45);
+    // particle stepping
+    this._stepAcc = 0; // accumulates time to spawn step particles
+  }
+  update(dt,input,world,camera,canvas){
+    let vx=0,vy=0; if(input.isDown('w')||input.isDown('arrowup')) vy -= 1; if(input.isDown('s')||input.isDown('arrowdown')) vy += 1; if(input.isDown('a')||input.isDown('arrowleft')) vx -= 1; if(input.isDown('d')||input.isDown('arrowright')) vx += 1; const mag=Math.hypot(vx,vy); if(mag>0){ vx/=mag; vy/=mag; }
+    const wantRun = input.isDown('shift');
+    const isMovingInput = (vx !== 0 || vy !== 0);
+
+    // allow starting a sprint only if not exhausted (exhausted = previously hit 0).
+    // Running also requires movement input to actually sprint.
+    const canStartRun = wantRun && !this.exhausted && isMovingInput && this.stamina > 0;
+    this.running = !!canStartRun;
+
+    const speed = this.baseSpeed * (this.running ? this.runMultiplier : 1);
+    const nx = this.x + vx*speed*dt; const ny = this.y + vy*speed*dt;
+    this.radius = Math.max(4, this.worldSize * 0.45);
+
+    const collidesCircle = (cx,cy,r) => {
+      const tx0 = Math.floor((cx - r) / TILE), tx1 = Math.floor((cx + r) / TILE);
+      const ty0 = Math.floor((cy - r) / TILE), ty1 = Math.floor((cy + r) / TILE);
+      for(let ty=ty0; ty<=ty1; ty++){
+        for(let tx=tx0; tx<=tx1; tx++){
+          if(!world.inBounds(tx,ty)) continue;
+          const tile = world.getTile(tx,ty);
+          if(tile === TILE_WATER){ if(circleRectIntersect(cx,cy,r, tx*TILE, ty*TILE, TILE, TILE)) return true; }
+        }
+      }
+      for(const t of world.trees){
+        const dx = t.cx - cx, dy = t.cy - cy; const maxDist = r + Math.sqrt(2)*(TREE_WORLD_SIZE/2);
+        if(dx*dx + dy*dy > maxDist*maxDist) continue;
+        if(circleVsTreeMask(cx, cy, r, t.cx, t.cy)) return true;
+      }
+      return false;
+    };
+    if(!collidesCircle(nx, this.y, this.radius)) this.x = nx;
+    if(!collidesCircle(this.x, ny, this.radius)) this.y = ny;
+
+    // ---------------- Stamina + Exhaustion logic ----------------
+    // If running and moving, drain stamina. If stamina hits 0 -> set exhausted and stop sprinting.
+    if(this.running && isMovingInput){
+      this.stamina -= STAMINA_DRAIN_PER_SEC * dt;
+      if(this.stamina <= 0){
+        // fully depleted -> enforce exhaustion lock
+        this.stamina = 0;
+        this.exhausted = true;
+        this.running = false; // immediately stop sprint
+      }
+    } else {
+      // not sprinting: recover stamina
+      this.stamina += STAMINA_RECOVER_PER_SEC * dt;
+      if(this.stamina >= STAMINA_MAX){
+        this.stamina = STAMINA_MAX;
+        // once fully regenerated, clear exhaustion lock so player can sprint again
+        if(this.exhausted) this.exhausted = false;
+      }
+    }
+
+    // Update stamina UI (rounded)
+    const sEl = document.getElementById('staminaVal'); if(sEl) sEl.textContent = Math.round(this.stamina);
+
+    const mw = camera.screenToWorld(input.mouse.x, input.mouse.y);
+    this.angle = Math.atan2(mw.y - this.y, mw.x - this.x);
+
+    // --- particles on movement (1x1 world pixels; lightweight)
+    const moving = (vx !== 0 || vy !== 0);
+    if(moving){
+      // control spawn rate: running spawns more frequently but still modest
+      const spawnRate = this.running ? 0.020 : 0.055; // seconds per particle (smaller -> more particles). keep small numbers to ensure few particles
+      this._stepAcc += dt;
+      // spawn at most a couple per frame to avoid overload
+      while(this._stepAcc >= spawnRate){
+        this._stepAcc -= spawnRate;
+        // spawn particle behind player with some randomness
+        const spread = this.running ? 6 : 3; // world units
+        const backX = this.x - vx * (this.worldSize*0.5);
+        const backY = this.y - vy * (this.worldSize*0.5);
+        const ox = (Math.random()*2 - 1) * spread;
+        const oy = (Math.random()*2 - 1) * spread * 0.6;
+        const px = backX + ox;
+        const py = backY + oy + this.worldSize*0.25; // slightly below center
+        const speedMul = this.running ? 50 : 18;
+        const pvx = (-vx * (10 + Math.random()*speedMul)) + (Math.random()*20 - 10);
+        const pvy = (-vy * (6 + Math.random()*12)) + (Math.random()*6 - 3);
+
+        // choose color by ground tile underfoot (dirt -> brown, grass -> variant greens, water -> blue splash)
+        const tx = Math.floor(this.x / TILE), ty = Math.floor(this.y / TILE);
+        let color = '#c6b28a'; // default dirt-like
+        const tileUnder = world.getTile(tx,ty);
+        if(tileUnder >= TILE_GRASS_BASE && tileUnder < TILE_GRASS_BASE + GRASS_VARIANTS) {
+          // pick color based on grass variant stored in world.grassVariant
+          const gv = world.grassVariant[world.idx(tx,ty)] || 0;
+          const grassPalette = ['#7cc85b','#6fb23a','#8bdc66','#5fb03a'];
+          color = grassPalette[gv] || '#8bd26a';
+        } else if(tileUnder === TILE_DIRT) {
+          color = '#9f6b3a';
+        } else if(tileUnder === TILE_WATER) {
+          color = '#6fc3ff';
+        }
+
+        // lifetime shorter for running to keep count low
+        const life = this.running ? 0.35 + Math.random()*0.2 : 0.6 + Math.random()*0.4;
+        particleSystem.spawn(px, py, pvx, pvy, life, color);
+      }
+    } else {
+      // if not moving, slowly decay accumulator
+      this._stepAcc = Math.max(0, this._stepAcc - dt*2);
+    }
+  }
+  draw(ctx){
+    ctx.save(); ctx.translate(this.x, this.y); const drawRot = this.angle + Math.PI/2; ctx.rotate(drawRot);
+    if(this.imgLoaded){ ctx.imageSmoothingEnabled = false; const w = this.worldSize, h = this.worldSize; ctx.drawImage(this.img, -w/2, -h/2, w, h); } else { ctx.fillStyle='#ffd8a8'; ctx.fillRect(-this.worldSize/4, -this.worldSize/4, this.worldSize/2, this.worldSize/2); }
+    ctx.restore();
+  }
+}
+
+// -------------------- Instances --------------------
+const atlasSmall = createPixelatedTileAtlas(8);
+const world = new World(MAP_W, MAP_H);
+const spawn = world.findSafeSpawn();
+const particleSystem = new ParticleSystem(120); // capped particles (user requested not too many)
+const player = new Player(spawn.x, spawn.y);
+const camera = new Camera(player.x, player.y, CAMERA_DEFAULT);
+const input = new Input(canvas);
+
+// -------------------- UI: stamina --------------------
 function drawStaminaBar(){ const bar=document.getElementById('stamina'); if(!bar) return; const pct=player.stamina/STAMINA_MAX; const w=160,h=10,inner=Math.round(pct*w); bar.innerHTML = `Stamina: <span id="staminaVal">${Math.round(player.stamina)}</span>\n    <div style="margin-top:6px;background:rgba(255,255,255,0.08);width:${w}px;height:${h}px;border-radius:6px;overflow:hidden">\n      <div style="width:${inner}px;height:${h}px;background:linear-gradient(90deg,#9be15d,#27ae60);"></div>\n    </div>`; }
 function loopUISync(){ drawStaminaBar(); requestAnimationFrame(loopUISync); }
+requestAnimationFrame(loopUISync);
 
-// -------------------- Loading / Preloader --------------------
-function loadAssets(paths, onProgress, onComplete){
-  const total = paths.length;
-  let loaded = 0;
-  const out = {};
-  if(total === 0){ onComplete(out); return; }
-  paths.forEach(p => {
-    const img = new Image();
-    img.onload = () => { loaded++; out[p] = img; onProgress(loaded, total); if(loaded === total) onComplete(out); };
-    img.onerror = () => { console.warn('Failed to load', p); loaded++; out[p] = img; onProgress(loaded, total); if(loaded === total) onComplete(out); };
-    img.src = p;
-  });
-}
-
-// assets to wait for (include Loading.png so the overlay image is guaranteed ready)
-const assetPaths = ['Loading.png','Tree.png','Rock1.png','Rock2.png','Rock3.png','Player.png'];
-
-const progressBarInner = document.getElementById('progressBarInner');
-const progressText = document.getElementById('progressText');
-const loadingOverlay = document.getElementById('loadingOverlay');
-
-loadAssets(assetPaths, (loaded, total) => {
-  const pct = Math.round(loaded / total * 100);
-  progressBarInner.style.width = pct + '%';
-  progressText.textContent = `Loading — ${pct}%`;
-}, (loadedImages) => {
-  // store images
-  imagesByPath = loadedImages;
-  // build tree mask from loaded tree image (if present)
-  if(imagesByPath['Tree.png'] && imagesByPath['Tree.png'].complete) {
-    treeImg = imagesByPath['Tree.png'];
-    buildTreeMaskFromImage(treeImg);
-  }
-  // build rock array
-  rockImgs = [ imagesByPath['Rock1.png'], imagesByPath['Rock2.png'], imagesByPath['Rock3.png'] ];
-  // fade out overlay then start game
-  loadingOverlay.classList.add('hidden');
-  setTimeout(startGame, 480); // short delay to finish fade
-});
-
-// -------------------- Game loop + render (will be started by startGame) --------------------
-let last = 0;
-function gameLoop(now){
-  if(!last) last = now;
-  const dt = Math.min((now-last)/1000, 1/15);
-  last = now;
-  player.update(dt,input,world,camera,canvas, particleSystem);
-  camera.update(dt,player.x,player.y);
-  const mw = camera.screenToWorld(input.mouse.x, input.mouse.y);
-  input.mouse.worldX = mw.x; input.mouse.worldY = mw.y;
-  render(dt);
-  requestAnimationFrame(gameLoop);
-}
+// -------------------- Game loop + render --------------------
+let last = performance.now();
+function gameLoop(now){ const dt = Math.min((now-last)/1000, 1/15); last = now; player.update(dt,input,world,camera,canvas); camera.update(dt,player.x,player.y); const mw = camera.screenToWorld(input.mouse.x, input.mouse.y); input.mouse.worldX = mw.x; input.mouse.worldY = mw.y; render(dt); requestAnimationFrame(gameLoop); }
+requestAnimationFrame(gameLoop);
 
 function render(dt){
   ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0, canvas.width, canvas.height);
   const S = camera.scale * DPR; const tx = canvasW * DPR / 2 - camera.x * camera.scale * DPR; const ty = canvasH * DPR / 2 - camera.y * camera.scale * DPR;
   ctx.setTransform(S, 0, 0, S, tx, ty);
   ctx.imageSmoothingEnabled = false;
-
+  // pass rockImgs & base size to world.draw
   world.draw(ctx, camera, canvas, atlasSmall, treeImg, TREE_WORLD_SIZE, rockImgs, ROCK_BASE_WORLD_SIZE);
 
+  // update & draw particles (draw before player so they appear underfoot)
   particleSystem.update(dt);
   particleSystem.draw(ctx);
 
@@ -529,38 +506,6 @@ function render(dt){
   ctx.restore();
 }
 
-// -------------------- Start game after assets loaded --------------------
-function startGame(){
-  // create small atlas, world and other instances
-  atlasSmall = createPixelatedTileAtlas(8);
-  world = new World(MAP_W, MAP_H);
-  const spawn = world.findSafeSpawn();
-  particleSystem = new ParticleSystem(120);
-  player = new Player(spawn.x, spawn.y);
-
-  // attach preloaded player image if available
-  if(imagesByPath['Player.png']) {
-    player.img = imagesByPath['Player.png'];
-    player.imgLoaded = !!player.img.complete;
-  } else {
-    // fallback: keep default (will draw placeholder)
-  }
-
-  // ensure treeImg / rockImgs variables are set (already set in loader)
-  if(imagesByPath['Tree.png']) treeImg = imagesByPath['Tree.png'];
-  rockImgs = [ imagesByPath['Rock1.png'], imagesByPath['Rock2.png'], imagesByPath['Rock3.png'] ];
-
-  const cameraStart = new Camera(player.x, player.y, CAMERA_DEFAULT);
-  camera = cameraStart;
-  input = new Input(canvas);
-
-  // start UI loop + game loop
-  requestAnimationFrame(loopUISync);
-  last = performance.now();
-  requestAnimationFrame(gameLoop);
-}
-
-// -------------------- small helpers --------------------
 window.addEventListener('resize', ()=>{ resizeCanvas(); });
 
 </script>
