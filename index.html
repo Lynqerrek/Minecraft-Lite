@@ -23,16 +23,18 @@
     }
     #loading .bar > div { height:100%; width:0%; background: linear-gradient(90deg,#9be15d,#27ae60); border-radius:6px; }
     #loadingText { font-size:16px; opacity:0.95; }
+    #loadingLogo { max-width:220px; max-height:120px; image-rendering:pixelated; display:block; }
   </style>
 </head>
 <body>
   <canvas id="game"></canvas>
 
-  <!-- Loading overlay -->
+  <!-- Loading overlay (with logo image) -->
   <div id="loading">
+    <img id="loadingLogo" src="" alt="Loading logo" />
     <div id="loadingText">Loading… 0%</div>
     <div class="bar"><div id="loadingBar"></div></div>
-    <div style="opacity:0.7;font-size:12px">Loading assets: Player.png, Tree.png, Rock1/2/3.png</div>
+    <div style="opacity:0.7;font-size:12px">Loading assets: Player.png, Tree.png, Rock1/2/3.png, Loading.png</div>
   </div>
 
   <div id="hud" class="hud">
@@ -480,8 +482,9 @@ const input = new Input(canvas);
 const loadingEl = document.getElementById('loading');
 const loadingText = document.getElementById('loadingText');
 const loadingBar = document.getElementById('loadingBar');
+const loadingLogoEl = document.getElementById('loadingLogo');
 
-let assetsTotal = 5; // Player + Tree + Rock1 + Rock2 + Rock3
+let assetsTotal = 6; // Player + Tree + Rock1 + Rock2 + Rock3 + Loading image
 let assetsLoaded = 0;
 function updateLoadingUI(){
   const pct = Math.round((assetsLoaded / assetsTotal) * 100);
@@ -492,9 +495,8 @@ function assetLoaded(){
   assetsLoaded = Math.min(assetsTotal, assetsLoaded + 1);
   updateLoadingUI();
   if(assetsLoaded >= assetsTotal){
-    // all assets loaded: hide loading overlay and start loops
-    loadingEl.style.display = 'none';
-    startLoops();
+    // small delay so users see 100% briefly (optional); keep minimal
+    setTimeout(()=>{ loadingEl.style.display = 'none'; startLoops(); }, 120);
   }
 }
 
@@ -519,6 +521,22 @@ for(let i=1;i<=3;i++){
   r.src = `Rock${i}.png`;
   rockImgs.push(r);
 }
+
+// loading-image (logo) — attempts to load Loading.png (change filename if needed)
+const loadingImg = new Image();
+loadingImg.onload = ()=>{
+  // success: show it and count as loaded
+  loadingLogoEl.src = loadingImg.src;
+  assetLoaded();
+};
+loadingImg.onerror = ()=>{
+  // hide logo if missing and still count as loaded so loader won't hang
+  loadingLogoEl.style.display = 'none';
+  console.warn('Loading.png not found — skipping loading image.');
+  assetLoaded();
+};
+// set filename here — change to your original file name if different
+loadingImg.src = 'Loading.png';
 
 // -------------------- UI: stamina (shows EXHAUSTED text when player.exhausted) --------------------
 function drawStaminaBar(){
