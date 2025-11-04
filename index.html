@@ -11,10 +11,30 @@
     .title{font-weight:700;margin-bottom:6px}
     .hint{opacity:.9}
     .stamina{position:fixed;left:12px;bottom:12px;padding:6px;background:rgba(0,0,0,0.32);border-radius:8px;color:#fff;font-family:monospace;pointer-events:none;transform-origin:0 0}
+    /* Loading overlay */
+    #loading {
+      position:fixed; left:0; top:0; width:100%; height:100%;
+      display:flex; align-items:center; justify-content:center;
+      background: #07101a; z-index:9999; color:#fff; font-family:system-ui;
+      flex-direction:column; gap:12px;
+    }
+    #loading .bar {
+      width:300px; height:10px; background: rgba(255,255,255,0.06); border-radius:6px; overflow:hidden;
+    }
+    #loading .bar > div { height:100%; width:0%; background: linear-gradient(90deg,#9be15d,#27ae60); border-radius:6px; }
+    #loadingText { font-size:16px; opacity:0.95; }
   </style>
 </head>
 <body>
   <canvas id="game"></canvas>
+
+  <!-- Loading overlay -->
+  <div id="loading">
+    <div id="loadingText">Loading… 0%</div>
+    <div class="bar"><div id="loadingBar"></div></div>
+    <div style="opacity:0.7;font-size:12px">Loading assets: Player.png, Tree.png, Rock1/2/3.png</div>
+  </div>
+
   <div id="hud" class="hud">
     <div class="title">MineLite</div>
     <div><strong>Controls</strong></div>
@@ -256,25 +276,12 @@ const STAMINA_RECOVER_PER_SEC = 5;
 
 // ---------- Tree image + per-pixel mask ----------
 const treeImg = new Image();
-treeImg.src = 'Tree.png'; // 16x16 pixel-art tree
 let TREE_WORLD_SIZE = TILE * 1.75; // world units
 let TREE_RADIUS = TREE_WORLD_SIZE * 0.45;
 let treeMask = null; let treeImgW = 0, treeImgH = 0;
-treeImg.onload = () => {
-  treeImgW = treeImg.width; treeImgH = treeImg.height; TREE_RADIUS = TREE_WORLD_SIZE * 0.45;
-  const c = document.createElement('canvas'); c.width = treeImgW; c.height = treeImgH; const cc = c.getContext('2d'); cc.imageSmoothingEnabled=false; cc.clearRect(0,0,c.width,c.height); cc.drawImage(treeImg,0,0);
-  const id = cc.getImageData(0,0,c.width,c.height).data;
-  treeMask = new Uint8Array(treeImgW * treeImgH);
-  for(let y=0;y<treeImgH;y++){ for(let x=0;x<treeImgW;x++){ const idx=(y*c.width+x)*4+3; treeMask[y*c.width+x] = id[idx] > 128 ? 1 : 0; } }
-  console.log('Tree.png loaded', treeImgW+'x'+treeImgH, 'mask built');
-};
 
 // ---------- Rock images (variants) ----------
 const rockImgs = [];
-for(let i=1;i<=3;i++){
-  const r = new Image(); r.src = `Rock${i}.png`; r.onload = ()=>{ console.log(`Rock${i}.png loaded`, r.width+'x'+r.height); };
-  rockImgs.push(r);
-}
 const ROCK_BASE_WORLD_SIZE = TILE * 0.24; // base rock size in world units; individual rock scales multiply this
 
 // ---------- Collision helpers ----------
@@ -345,8 +352,12 @@ class Player{
   constructor(x,y){
     this.x=x; this.y=y; this.baseSpeed=140; this.runMultiplier=1.9; this.angle=0;
     this.stamina=STAMINA_MAX; this.running=false;
-    this.exhausted = false; // NEW: flag to lock sprint until full regen when stamina hit 0
-    this.img = new Image(); this.imgLoaded = false; this.img.src = 'Player.png'; this.img.onload = ()=>{ this.imgLoaded = true; };
+    this.exhausted = false; // locked until full regen if stamina hit 0
+    this.img = new Image(); this.imgLoaded = false;
+    // player image onload will mark loaded (for loader)
+    this.img.onload = ()=>{ this.imgLoaded = true; assetLoaded(); };
+    this.img.onerror = ()=>{ this.imgLoaded = true; assetLoaded(); };
+    this.img.src = 'Player.png';
     this.worldSize = TILE * 0.5; this.radius = Math.max(4, this.worldSize * 0.45);
     // particle stepping
     this._stepAcc = 0; // accumulates time to spawn step particles
@@ -356,8 +367,7 @@ class Player{
     const wantRun = input.isDown('shift');
     const isMovingInput = (vx !== 0 || vy !== 0);
 
-    // allow starting a sprint only if not exhausted (exhausted = previously hit 0).
-    // Running also requires movement input to actually sprint.
+    // only start sprint if not exhausted, moving, and have stamina > 0
     const canStartRun = wantRun && !this.exhausted && isMovingInput && this.stamina > 0;
     this.running = !!canStartRun;
 
@@ -386,21 +396,19 @@ class Player{
     if(!collidesCircle(this.x, ny, this.radius)) this.y = ny;
 
     // ---------------- Stamina + Exhaustion logic ----------------
-    // If running and moving, drain stamina. If stamina hits 0 -> set exhausted and stop sprinting.
     if(this.running && isMovingInput){
       this.stamina -= STAMINA_DRAIN_PER_SEC * dt;
       if(this.stamina <= 0){
-        // fully depleted -> enforce exhaustion lock
+        // exhausted: lock sprint until full regen
         this.stamina = 0;
         this.exhausted = true;
-        this.running = false; // immediately stop sprint
+        this.running = false;
       }
     } else {
-      // not sprinting: recover stamina
+      // recover
       this.stamina += STAMINA_RECOVER_PER_SEC * dt;
       if(this.stamina >= STAMINA_MAX){
         this.stamina = STAMINA_MAX;
-        // once fully regenerated, clear exhaustion lock so player can sprint again
         if(this.exhausted) this.exhausted = false;
       }
     }
@@ -415,12 +423,10 @@ class Player{
     const moving = (vx !== 0 || vy !== 0);
     if(moving){
       // control spawn rate: running spawns more frequently but still modest
-      const spawnRate = this.running ? 0.020 : 0.055; // seconds per particle (smaller -> more particles). keep small numbers to ensure few particles
+      const spawnRate = this.running ? 0.020 : 0.055; // seconds per particle
       this._stepAcc += dt;
-      // spawn at most a couple per frame to avoid overload
       while(this._stepAcc >= spawnRate){
         this._stepAcc -= spawnRate;
-        // spawn particle behind player with some randomness
         const spread = this.running ? 6 : 3; // world units
         const backX = this.x - vx * (this.worldSize*0.5);
         const backY = this.y - vy * (this.worldSize*0.5);
@@ -437,7 +443,6 @@ class Player{
         let color = '#c6b28a'; // default dirt-like
         const tileUnder = world.getTile(tx,ty);
         if(tileUnder >= TILE_GRASS_BASE && tileUnder < TILE_GRASS_BASE + GRASS_VARIANTS) {
-          // pick color based on grass variant stored in world.grassVariant
           const gv = world.grassVariant[world.idx(tx,ty)] || 0;
           const grassPalette = ['#7cc85b','#6fb23a','#8bdc66','#5fb03a'];
           color = grassPalette[gv] || '#8bd26a';
@@ -447,7 +452,6 @@ class Player{
           color = '#6fc3ff';
         }
 
-        // lifetime shorter for running to keep count low
         const life = this.running ? 0.35 + Math.random()*0.2 : 0.6 + Math.random()*0.4;
         particleSystem.spawn(px, py, pvx, pvy, life, color);
       }
@@ -467,21 +471,85 @@ class Player{
 const atlasSmall = createPixelatedTileAtlas(8);
 const world = new World(MAP_W, MAP_H);
 const spawn = world.findSafeSpawn();
-const particleSystem = new ParticleSystem(120); // capped particles (user requested not too many)
+const particleSystem = new ParticleSystem(120); // capped particles
 const player = new Player(spawn.x, spawn.y);
 const camera = new Camera(player.x, player.y, CAMERA_DEFAULT);
 const input = new Input(canvas);
 
-// -------------------- UI: stamina --------------------
-function drawStaminaBar(){ const bar=document.getElementById('stamina'); if(!bar) return; const pct=player.stamina/STAMINA_MAX; const w=160,h=10,inner=Math.round(pct*w); bar.innerHTML = `Stamina: <span id="staminaVal">${Math.round(player.stamina)}</span>\n    <div style="margin-top:6px;background:rgba(255,255,255,0.08);width:${w}px;height:${h}px;border-radius:6px;overflow:hidden">\n      <div style="width:${inner}px;height:${h}px;background:linear-gradient(90deg,#9be15d,#27ae60);"></div>\n    </div>`; }
+// -------------------- Asset loader (loading overlay) --------------------
+const loadingEl = document.getElementById('loading');
+const loadingText = document.getElementById('loadingText');
+const loadingBar = document.getElementById('loadingBar');
+
+let assetsTotal = 5; // Player + Tree + Rock1 + Rock2 + Rock3
+let assetsLoaded = 0;
+function updateLoadingUI(){
+  const pct = Math.round((assetsLoaded / assetsTotal) * 100);
+  loadingText.textContent = `Loading… ${pct}%`;
+  loadingBar.style.width = `${pct}%`;
+}
+function assetLoaded(){
+  assetsLoaded = Math.min(assetsTotal, assetsLoaded + 1);
+  updateLoadingUI();
+  if(assetsLoaded >= assetsTotal){
+    // all assets loaded: hide loading overlay and start loops
+    loadingEl.style.display = 'none';
+    startLoops();
+  }
+}
+
+// wire up treeImg load + mask build + assetLoaded
+treeImg.onload = () => {
+  treeImgW = treeImg.width; treeImgH = treeImg.height; TREE_RADIUS = TREE_WORLD_SIZE * 0.45;
+  const c = document.createElement('canvas'); c.width = treeImgW; c.height = treeImgH; const cc = c.getContext('2d'); cc.imageSmoothingEnabled=false; cc.clearRect(0,0,c.width,c.height); cc.drawImage(treeImg,0,0);
+  const id = cc.getImageData(0,0,c.width,c.height).data;
+  treeMask = new Uint8Array(treeImgW * treeImgH);
+  for(let y=0;y<treeImgH;y++){ for(let x=0;x<treeImgW;x++){ const idx=(y*c.width+x)*4+3; treeMask[y*c.width+x] = id[idx] > 128 ? 1 : 0; } }
+  console.log('Tree.png loaded', treeImgW+'x'+treeImgH, 'mask built');
+  assetLoaded();
+};
+treeImg.onerror = ()=>{ console.warn('Tree.png failed to load'); assetLoaded(); };
+treeImg.src = 'Tree.png';
+
+// rock images with assetLoaded wired
+for(let i=1;i<=3;i++){
+  const r = new Image();
+  r.onload = ()=>{ console.log(`Rock${i}.png loaded`, r.width+'x'+r.height); assetLoaded(); };
+  r.onerror = ()=>{ console.warn(`Rock${i}.png failed to load`); assetLoaded(); };
+  r.src = `Rock${i}.png`;
+  rockImgs.push(r);
+}
+
+// -------------------- UI: stamina (shows EXHAUSTED text when player.exhausted) --------------------
+function drawStaminaBar(){
+  const bar=document.getElementById('stamina'); if(!bar) return;
+  const pct=player.stamina/STAMINA_MAX;
+  const w=160,h=10,inner=Math.round(pct*w);
+  const exhaustedText = player.exhausted ? `<div style="color:#ff6b6b;font-weight:700;margin-bottom:6px;text-align:left">EXHAUSTED</div>` : '';
+  bar.innerHTML = `${exhaustedText}Stamina: <span id="staminaVal">${Math.round(player.stamina)}</span>
+    <div style="margin-top:6px;background:rgba(255,255,255,0.08);width:${w}px;height:${h}px;border-radius:6px;overflow:hidden">
+      <div style="width:${inner}px;height:${h}px;background:linear-gradient(90deg,#9be15d,#27ae60);"></div>
+    </div>`;
+}
+
+// We'll start this loop after assets are loaded
+let uiLoopStarted = false;
 function loopUISync(){ drawStaminaBar(); requestAnimationFrame(loopUISync); }
-requestAnimationFrame(loopUISync);
 
 // -------------------- Game loop + render --------------------
 let last = performance.now();
 function gameLoop(now){ const dt = Math.min((now-last)/1000, 1/15); last = now; player.update(dt,input,world,camera,canvas); camera.update(dt,player.x,player.y); const mw = camera.screenToWorld(input.mouse.x, input.mouse.y); input.mouse.worldX = mw.x; input.mouse.worldY = mw.y; render(dt); requestAnimationFrame(gameLoop); }
-requestAnimationFrame(gameLoop);
 
+// start both loops once loading done
+function startLoops(){
+  if(!uiLoopStarted){
+    uiLoopStarted = true;
+    requestAnimationFrame(loopUISync);
+    requestAnimationFrame(gameLoop);
+  }
+}
+
+// -------------------- render --------------------
 function render(dt){
   ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0, canvas.width, canvas.height);
   const S = camera.scale * DPR; const tx = canvasW * DPR / 2 - camera.x * camera.scale * DPR; const ty = canvasH * DPR / 2 - camera.y * camera.scale * DPR;
