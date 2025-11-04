@@ -325,19 +325,43 @@ class ParticleSystem {
 class Player{
   constructor(x,y){
     this.x=x; this.y=y; this.baseSpeed=140; this.runMultiplier=1.9; this.angle=0; this.stamina=STAMINA_MAX; this.running=false;
+    // exhaustion flag: becomes true only if stamina reaches 0 while running.
+    // While exhausted is true, sprinting is disabled until stamina regenerates to 25%.
+    this.exhausted = false;
     this.img = new Image(); this.imgLoaded = false; // we'll set image from preloader later
     this.worldSize = TILE * 0.5; this.radius = Math.max(4, this.worldSize * 0.45);
     this._stepAcc = 0;
   }
   update(dt,input,world,camera,canvas, particleSystem){
     let vx=0,vy=0; if(input.isDown('w')||input.isDown('arrowup')) vy -= 1; if(input.isDown('s')||input.isDown('arrowdown')) vy += 1; if(input.isDown('a')||input.isDown('arrowleft')) vx -= 1; if(input.isDown('d')||input.isDown('arrowright')) vx += 1; const mag=Math.hypot(vx,vy); if(mag>0){ vx/=mag; vy/=mag; }
-    const wantRun = input.isDown('shift'); const canRun = wantRun && this.stamina > 1; this.running = canRun; const speed = this.baseSpeed * (this.running ? this.runMultiplier : 1);
+
+    // ---------- Run/Exhaustion logic (fixed) ----------
+    // Desired sprint input:
+    const wantRun = input.isDown('shift');
+
+    // Determine whether sprinting is allowed this frame:
+    // - If exhausted (stamina hit 0 previously), sprinting is disabled until stamina >= 25% of max.
+    // - Otherwise sprinting is allowed as long as there's > 0 stamina and player is holding shift.
+    let canRun = false;
+    if(wantRun){
+      if(this.exhausted){
+        canRun = false;
+      } else {
+        // allow running while stamina > 0 (drain will reach 0 and then set exhausted)
+        canRun = this.stamina > 0;
+      }
+    } else {
+      canRun = false;
+    }
+    this.running = canRun;
+
+    const speed = this.baseSpeed * (this.running ? this.runMultiplier : 1);
     const nx = this.x + vx*speed*dt; const ny = this.y + vy*speed*dt;
     this.radius = Math.max(4, this.worldSize * 0.45);
 
     const collidesCircle = (cx,cy,r) => {
       const tx0 = Math.floor((cx - r) / TILE), tx1 = Math.floor((cx + r) / TILE);
-      const ty0 = Math.floor((cy - r) / TILE), ty1 = Math.floor((cy + r) / TILE);
+      const ty0 = Math.floor((cy - r) / TILE), ty1 = Math.floor((cy + r + r) / TILE);
       for(let ty=ty0; ty<=ty1; ty++){
         for(let tx=tx0; tx<=tx1; tx++){
           if(!world.inBounds(tx,ty)) continue;
@@ -355,11 +379,36 @@ class Player{
     if(!collidesCircle(nx, this.y, this.radius)) this.x = nx;
     if(!collidesCircle(this.x, ny, this.radius)) this.y = ny;
 
-    // stamina
-    if(this.running && (vx!==0 || vy!==0)){
-      this.stamina -= STAMINA_DRAIN_PER_SEC * dt; if(this.stamina < 0) this.stamina = 0;
-    } else { this.stamina += STAMINA_RECOVER_PER_SEC * dt; if(this.stamina > STAMINA_MAX) this.stamina = STAMINA_MAX; }
+    // ---------- Stamina update ----------
+    // We only drain stamina when we are actually running AND moving.
+    const isMoving = (vx !== 0 || vy !== 0);
+    const willDrain = this.running && isMoving;
+
+    if(willDrain){
+      this.stamina -= STAMINA_DRAIN_PER_SEC * dt;
+      // If we hit zero while draining, clamp and set exhausted state.
+      if(this.stamina <= 0){
+        this.stamina = 0;
+        // Only set exhausted when stamina actually ran out (used fully).
+        this.exhausted = true;
+        // Immediately stop running — player can't sprint once exhausted.
+        this.running = false;
+      }
+    } else {
+      // Recover stamina when not actively draining.
+      this.stamina += STAMINA_RECOVER_PER_SEC * dt;
+      if(this.stamina > STAMINA_MAX) this.stamina = STAMINA_MAX;
+
+      // If we were exhausted, only remove the exhausted lock when stamina reaches 25% of max.
+      if(this.exhausted && this.stamina >= STAMINA_MAX * 0.25){
+        this.exhausted = false;
+        // Note: sprint will only resume if player is still holding shift next frames.
+      }
+    }
+
+    // Update UI stamina text
     const sEl = document.getElementById('staminaVal'); if(sEl) sEl.textContent = Math.round(this.stamina);
+
     const mw = camera.screenToWorld(input.mouse.x, input.mouse.y);
     this.angle = Math.atan2(mw.y - this.y, mw.x - this.x);
 
