@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>MineLite — Player1Up mask collisions</title>
+  <title>MineLite — Player1Up mask collisions (day/night)</title>
   <style>
     html,body{height:100%;margin:0;background:#0b1220;color:#ddd;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;overflow:hidden}
     canvas{display:block}
@@ -40,6 +40,7 @@
     <div class="hint">Hold Shift — run (uses stamina)</div>
     <div class="hint">Mouse — aim (not used for facing)</div>
     <div class="hint">Scroll — zoom (Ctrl+Scroll disabled)</div>
+    <div id="timeDisplay" class="hint" style="margin-top:8px;font-weight:600">Time: --:--</div>
   </div>
   <div id="stamina" class="stamina">Stamina: <span id="staminaVal">100</span></div>
 
@@ -70,6 +71,11 @@ const FRAME_INTERVAL_BASE = 0.35; // seconds per frame normally
 const STAMINA_MAX = 100;
 const STAMINA_DRAIN_PER_SEC = 12.5;
 const STAMINA_RECOVER_PER_SEC = 5;
+
+// ========== DAY / NIGHT CONFIG ==========
+let timeOfDay = 22.0; // hours (0-24) — start at night
+const DAY_LENGTH_SECONDS = 180; // full day in seconds (adjustable)
+let stars = [];
 
 // ========== HELPERS ==========
 function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
@@ -609,7 +615,7 @@ let treeImg = null;
 let rockImgs = [];
 let imagesByPath = {};
 
-function drawStaminaBar(){ const bar=document.getElementById('stamina'); if(!bar) return; const pct=player.stamina/STAMINA_MAX; const w=160,h=10,inner=Math.round(pct*w); bar.innerHTML = `Stamina: <span id="staminaVal">${Math.round(player.stamina)}</span>\n    <div style="margin-top:6px;background:rgba(255,255,255,0.08);width:${w}px;height:${h}px;border-radius:6px;overflow:hidden">\n      <div style="width:${inner}px;height:${h}px;background:linear-gradient(90deg,#9be15d,#27ae60);"></div>\n    </div>`; }
+function drawStaminaBar(){ const bar=document.getElementById('stamina'); if(!bar) return; const pct=player.stamina/STAMINA_MAX; const w=160,h=10,inner=Math.round(pct*w); const timeEl = document.getElementById('timeDisplay'); if(timeEl) timeEl.textContent = `Time: ${formatTimeOfDay(timeOfDay)}`; bar.innerHTML = `Stamina: <span id="staminaVal">${Math.round(player.stamina)}</span>\n    <div style="margin-top:6px;background:rgba(255,255,255,0.08);width:${w}px;height:${h}px;border-radius:6px;overflow:hidden">\n      <div style="width:${inner}px;height:${h}px;background:linear-gradient(90deg,#9be15d,#27ae60);"></div>\n    </div>`; }
 function loopUISync(){ drawStaminaBar(); requestAnimationFrame(loopUISync); }
 
 const assetPaths = [
@@ -651,12 +657,32 @@ loadAssets(assetPaths, (loaded, total) => {
   setTimeout(startGame, 480);
 });
 
+// ========== DAY/NIGHT HELPERS ==========
+function formatTimeOfDay(t){
+  const h = Math.floor(t) % 24;
+  const m = Math.floor((t - Math.floor(t)) * 60);
+  return String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0');
+}
+
+function initStars(seed){
+  stars.length = 0;
+  const rnd = makeSeededRandom(seed >>> 0);
+  const count = 160;
+  for(let i=0;i<count;i++){
+    stars.push({ x: rnd(), y: rnd()*0.6, size: 0.5 + rnd()*1.6, alpha: 0.4 + rnd()*0.6, twinkle: rnd()*6 });
+  }
+}
+
 // ========== GAME LOOP & RENDER ==========
 let last = 0;
 function gameLoop(now){
   if(!last) last = now;
   const dt = Math.min((now-last)/1000, 1/15);
   last = now;
+
+  // advance time
+  timeOfDay = (timeOfDay + dt * (24 / DAY_LENGTH_SECONDS)) % 24;
+
   player.update(dt,input,world,camera,canvas, particleSystem);
   camera.update(dt,player.x,player.y);
   const mw = camera.screenToWorld(input.mouse.x, input.mouse.y);
@@ -666,7 +692,40 @@ function gameLoop(now){
 }
 
 function render(dt){
-  ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0, canvas.width, canvas.height);
+  // -- background sky (screen-space) --
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.clearRect(0,0, canvas.width, canvas.height);
+
+  // simple day/night blend — day color then dark overlay
+  const angle = (timeOfDay / 24) * Math.PI * 2 - Math.PI/2; // -PI/2 so sunrise at ~6:00
+  const sunElev = Math.max(0, Math.sin(angle)); // 0..1 when sun above horizon
+  const daylight = clamp(0.08 + sunElev * 0.92, 0.08, 1);
+
+  // base sky (day color)
+  ctx.fillStyle = '#87CEEB';
+  ctx.fillRect(0,0, canvas.width, canvas.height);
+
+  // subtle horizon gradient for sunrise/sunset tint
+  const g = ctx.createLinearGradient(0, canvas.height*0.15, 0, canvas.height);
+  g.addColorStop(0, `rgba(255,180,120,${clamp((sunElev*1.6-0.1),0,1)})`);
+  g.addColorStop(0.4, 'rgba(255,120,100,0)');
+  g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0,0, canvas.width, canvas.height);
+
+  // draw sun (behind world) — visible when above horizon
+  const sunX = canvas.width * (timeOfDay / 24);
+  const sunY = canvas.height * 0.18 + Math.sin(angle) * (canvas.height * 0.18);
+  if(sunElev > 0.02){
+    const r = 36 * DPR;
+    const rg = ctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, r*3);
+    rg.addColorStop(0, 'rgba(255,240,160,0.95)');
+    rg.addColorStop(0.4, 'rgba(255,200,100,0.25)');
+    rg.addColorStop(1, 'rgba(255,180,80,0)');
+    ctx.fillStyle = rg; ctx.beginPath(); ctx.arc(sunX, sunY, r*2.5,0,Math.PI*2); ctx.fill();
+  }
+
+  // draw world and game-space stuff with camera transform
   const S = camera.scale * DPR;
   const tx = canvasW * DPR / 2 - camera.x * camera.scale * DPR;
   const ty = canvasH * DPR / 2 - camera.y * camera.scale * DPR;
@@ -678,6 +737,7 @@ function render(dt){
   particleSystem.draw(ctx);
   player.draw(ctx);
 
+  // draw grid (debug)
   ctx.save(); ctx.globalAlpha = 0.02; ctx.lineWidth = 1 / S; ctx.strokeStyle = '#000';
   const left = Math.floor((camera.x - (canvasW/2)/camera.scale)/TILE) - 1;
   const right = Math.ceil((camera.x + (canvasW/2)/camera.scale)/TILE) + 1;
@@ -686,12 +746,60 @@ function render(dt){
   for(let x=left;x<=right;x++){ ctx.beginPath(); ctx.moveTo(x*TILE, top*TILE); ctx.lineTo(x*TILE, bottom*TILE); ctx.stroke(); }
   for(let y=top;y<=bottom;y++){ ctx.beginPath(); ctx.moveTo(left*TILE, y*TILE); ctx.lineTo(right*TILE, y*TILE); ctx.stroke(); }
   ctx.restore();
+
+  // overlay darkness (screen-space)
+  ctx.setTransform(1,0,0,1,0,0);
+  const nightAlpha = clamp(1 - daylight, 0, 0.95);
+  // subtle blue-black tint
+  ctx.fillStyle = `rgba(3,8,20,${nightAlpha})`;
+  ctx.fillRect(0,0, canvas.width, canvas.height);
+
+  // stars (only at night)
+  if(daylight < 0.45){
+    const starAlphaMul = clamp((1 - daylight) * 1.6, 0, 1);
+    ctx.globalCompositeOperation = 'lighter';
+    for(let i=0;i<stars.length;i++){
+      const s = stars[i];
+      const x = Math.floor(s.x * canvas.width);
+      const y = Math.floor(s.y * canvas.height);
+      const a = s.alpha * starAlphaMul * (0.6 + 0.4 * Math.sin((timeOfDay + s.twinkle) * 5.0));
+      ctx.globalAlpha = a;
+      ctx.fillRect(x, y, Math.max(1, Math.round(s.size*DPR)), Math.max(1, Math.round(s.size*DPR)));
+    }
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+  }
+
+  // draw sun & moon on top so they're not fully covered by overlay
+  const moonAngle = angle + Math.PI; // opposite
+  const moonX = canvas.width * ((timeOfDay + 12) % 24 / 24);
+  const moonY = canvas.height * 0.18 + Math.sin(moonAngle) * (canvas.height * 0.18);
+  if(daylight < 0.85){
+    ctx.save();
+    ctx.globalAlpha = clamp((1 - daylight)*1.1, 0.12, 1);
+    ctx.beginPath();
+    ctx.arc(moonX, moonY, 18*DPR, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(220,230,245,0.95)'; ctx.fill();
+    ctx.restore();
+  }
+
+  if(sunElev > 0.02){
+    ctx.save();
+    ctx.globalAlpha = clamp(sunElev * 1.0, 0.2, 1);
+    const r = 12 * DPR;
+    const sg = ctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, r*3);
+    sg.addColorStop(0, 'rgba(255,245,200,1)');
+    sg.addColorStop(1, 'rgba(255,210,110,0)');
+    ctx.fillStyle = sg; ctx.beginPath(); ctx.arc(sunX, sunY, r*2.25,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
 }
 
 // ========== START GAME ==========
 function startGame(){
   atlasSmall = createPixelatedTileAtlas(8);
   world = new World(MAP_W, MAP_H);
+  initStars(world.seed);
   const spawn = world.findSafeSpawn();
   particleSystem = new ParticleSystem(120);
   player = new Player(spawn.x, spawn.y);
