@@ -699,7 +699,7 @@ function render(dt){
   // simple day/night blend — day color then dark overlay
   const angle = (timeOfDay / 24) * Math.PI * 2 - Math.PI/2; // -PI/2 so sunrise at ~6:00
   const sunElev = Math.max(0, Math.sin(angle)); // 0..1 when sun above horizon
-  const daylight = clamp(0.08 + sunElev * 0.92, 0.08, 1);
+  const daylight = clamp(0.12 + sunElev * 0.88, 0.12, 1); // bias slightly brighter overall
 
   // base sky (day color)
   ctx.fillStyle = '#87CEEB';
@@ -707,7 +707,7 @@ function render(dt){
 
   // subtle horizon gradient for sunrise/sunset tint
   const g = ctx.createLinearGradient(0, canvas.height*0.15, 0, canvas.height);
-  g.addColorStop(0, `rgba(255,180,120,${clamp((sunElev*1.6-0.1),0,1)})`);
+  g.addColorStop(0, `rgba(255,180,120,${clamp((sunElev*1.2-0.08),0,1)})`);
   g.addColorStop(0.4, 'rgba(255,120,100,0)');
   g.addColorStop(1, 'rgba(0,0,0,0)');
   ctx.fillStyle = g;
@@ -720,7 +720,7 @@ function render(dt){
     const r = 36 * DPR;
     const rg = ctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, r*3);
     rg.addColorStop(0, 'rgba(255,240,160,0.95)');
-    rg.addColorStop(0.4, 'rgba(255,200,100,0.25)');
+    rg.addColorStop(0.4, 'rgba(255,200,100,0.18)');
     rg.addColorStop(1, 'rgba(255,180,80,0)');
     ctx.fillStyle = rg; ctx.beginPath(); ctx.arc(sunX, sunY, r*2.5,0,Math.PI*2); ctx.fill();
   }
@@ -749,20 +749,21 @@ function render(dt){
 
   // overlay darkness (screen-space)
   ctx.setTransform(1,0,0,1,0,0);
-  const nightAlpha = clamp(1 - daylight, 0, 0.95);
+  // make night less dark: cap maximum darkness to ~0.5 instead of near-black
+  const nightAlpha = clamp(1 - daylight, 0, 0.5);
   // subtle blue-black tint
   ctx.fillStyle = `rgba(3,8,20,${nightAlpha})`;
   ctx.fillRect(0,0, canvas.width, canvas.height);
 
-  // stars (only at night)
+  // stars (only at night) — make them more subtle when night is brighter
   if(daylight < 0.45){
-    const starAlphaMul = clamp((1 - daylight) * 1.6, 0, 1);
+    const starAlphaMul = clamp((1 - daylight) * 0.9, 0, 1);
     ctx.globalCompositeOperation = 'lighter';
     for(let i=0;i<stars.length;i++){
       const s = stars[i];
       const x = Math.floor(s.x * canvas.width);
       const y = Math.floor(s.y * canvas.height);
-      const a = s.alpha * starAlphaMul * (0.6 + 0.4 * Math.sin((timeOfDay + s.twinkle) * 5.0));
+      const a = s.alpha * starAlphaMul * (0.5 + 0.5 * Math.sin((timeOfDay + s.twinkle) * 5.0));
       ctx.globalAlpha = a;
       ctx.fillRect(x, y, Math.max(1, Math.round(s.size*DPR)), Math.max(1, Math.round(s.size*DPR)));
     }
@@ -770,30 +771,9 @@ function render(dt){
     ctx.globalAlpha = 1;
   }
 
-  // draw sun & moon on top so they're not fully covered by overlay
-  const moonAngle = angle + Math.PI; // opposite
-  const moonX = canvas.width * ((timeOfDay + 12) % 24 / 24);
-  const moonY = canvas.height * 0.18 + Math.sin(moonAngle) * (canvas.height * 0.18);
-  if(daylight < 0.85){
-    ctx.save();
-    ctx.globalAlpha = clamp((1 - daylight)*1.1, 0.12, 1);
-    ctx.beginPath();
-    ctx.arc(moonX, moonY, 18*DPR, 0, Math.PI*2);
-    ctx.fillStyle = 'rgba(220,230,245,0.95)'; ctx.fill();
-    ctx.restore();
-  }
-
-  if(sunElev > 0.02){
-    ctx.save();
-    ctx.globalAlpha = clamp(sunElev * 1.0, 0.2, 1);
-    const r = 12 * DPR;
-    const sg = ctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, r*3);
-    sg.addColorStop(0, 'rgba(255,245,200,1)');
-    sg.addColorStop(1, 'rgba(255,210,110,0)');
-    ctx.fillStyle = sg; ctx.beginPath(); ctx.arc(sunX, sunY, r*2.25,0,Math.PI*2); ctx.fill();
-    ctx.restore();
-  }
+  // NOTE: per request, we do NOT draw a moon or any bright object on top of the scene — it should not be seeable at night.
 }
+
 
 // ========== START GAME ==========
 function startGame(){
