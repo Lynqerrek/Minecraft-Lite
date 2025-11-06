@@ -46,7 +46,6 @@
 
 <script>
 // ========== CONFIG ==========
-// (kept your original constants unchanged)
 const TILE = 44;
 const MAP_W = 640, MAP_H = 640;
 let DPR = window.devicePixelRatio || 1;
@@ -63,7 +62,7 @@ const ZOOM_OUT_MIN = ZOOM_IN_MAX / 2;
 const CAMERA_DEFAULT = (ZOOM_IN_MAX + ZOOM_OUT_MIN) / 1.6;
 
 // --- PLAYER SIZE (2x bigger)
-const PLAYER_WORLD_SIZE = TILE * 0.85; // set to TILE*1.0 (was TILE*0.5) => 2x bigger
+const PLAYER_WORLD_SIZE = TILE * 0.85;
 
 // --- animation timings
 const FRAME_INTERVAL_BASE = 0.35; // seconds per frame normally
@@ -74,8 +73,6 @@ const STAMINA_DRAIN_PER_SEC = 12.5;
 const STAMINA_RECOVER_PER_SEC = 5;
 
 // ========== DAY / NIGHT CONFIG ==========
-// ... (rest of your original code unchanged until assets list)
-
 let timeOfDay = 22.0; // hours (0-24) — start at night
 const DAY_LENGTH_SECONDS = 180; // full day in seconds (adjustable)
 let stars = [];
@@ -617,7 +614,7 @@ let ROCK_BASE_WORLD_SIZE = TILE * 0.24;
 let treeImg = null;
 let rockImgs = [];
 let imagesByPath = {};
-let cloudImg = null; // <-- cloud image reference
+let cloudImg = null; // cloud image reference
 
 function drawStaminaBar(){ const bar=document.getElementById('stamina'); if(!bar) return; const pct=player.stamina/STAMINA_MAX; const w=160,h=10,inner=Math.round(pct*w); const timeEl = document.getElementById('timeDisplay'); if(timeEl) timeEl.textContent = `Time: ${formatTimeOfDay(timeOfDay)}`; bar.innerHTML = `Stamina: <span id="staminaVal">${Math.round(player.stamina)}</span>\n    <div style="margin-top:6px;background:rgba(255,255,255,0.08);width:${w}px;height:${h}px;border-radius:6px;overflow:hidden">\n      <div style="width:${inner}px;height:${h}px;background:linear-gradient(90deg,#9be15d,#27ae60);"></div>\n    </div>`; }
 function loopUISync(){ drawStaminaBar(); requestAnimationFrame(loopUISync); }
@@ -630,7 +627,7 @@ const assetPaths = [
   'Player1Up.png','Player2Up.png',
   'Player1Right.png','Player2Right.png',
   'IdlePlayer.png',
-  'Cloud.png' // <<< add the 16x16 cloud texture (place Cloud.png in repo)
+  'Cloud.png' // <- place your 16x16 Cloud.png here
 ];
 
 function loadAssets(paths, onProgress, onComplete){
@@ -658,7 +655,7 @@ loadAssets(assetPaths, (loaded, total) => {
   imagesByPath = loadedImages;
   if(imagesByPath['Tree.png'] && imagesByPath['Tree.png'].complete){ treeImg = imagesByPath['Tree.png']; buildTreeMaskFromImage(treeImg); }
   rockImgs = [ imagesByPath['Rock1.png'], imagesByPath['Rock2.png'], imagesByPath['Rock3.png'] ];
-  cloudImg = imagesByPath['Cloud.png'] || null; // cloud texture
+  cloudImg = imagesByPath['Cloud.png'] || null;
   loadingOverlay.classList.add('hidden');
   setTimeout(startGame, 480);
 });
@@ -679,7 +676,7 @@ function initStars(seed){
   }
 }
 
-// ========== CLOUD LAYER ==========
+// ========== CLOUD LAYER (visible when zoomed out) ==========
 class CloudLayer {
   constructor(cloudImg, worldW, worldH, seed = 0){
     this.img = cloudImg; // 16x16
@@ -710,7 +707,7 @@ class CloudLayer {
         const jy = (this._rnd() - 0.5) * spacing * 0.4;
         const scale = 0.8 + this._rnd() * 1.6; // world-space scale for the small 16px sprite
         const alpha = 0.08 + this._rnd() * 0.22;
-        const drift = (0.8 + this._rnd() * 1.4) * (0.5 + this._rnd()); // px/sec drift in world-space (modified by parallax)
+        const drift = (0.8 + this._rnd() * 1.4) * (0.5 + this._rnd()); // px/sec drift in world-space
         this.clouds.push({ x: x + jx, y: y + jy, scale, alpha, drift, phase: this._rnd()*Math.PI*2 });
       }
     }
@@ -727,13 +724,22 @@ class CloudLayer {
   // camera: Camera instance
   draw(ctx, camera){
     if(!this.img || !this.img.complete) return;
-    // intensity: 0 when at CAMERA_DEFAULT, 1 at ZOOM_OUT_MIN (zoomed out)
-    const t = clamp((CAMERA_DEFAULT - camera.scale) / (CAMERA_DEFAULT - ZOOM_OUT_MIN || 1e-6), 0, 1);
-    // cloud visual parameters driven by t (zoom-out increases cloud presence)
-    const alphaMul = lerp(0.0, 1.0, smoothstep(t));
-    const globalScaleMul = lerp(1.0, 1.6, t); // clouds become a bit larger when zoomed out
-    // parallax factor: smaller => clouds move less when camera moves (appear further)
-    const parallax = lerp(0.70, 0.28, t);
+
+    // t = 0 when camera.scale == CAMERA_DEFAULT, t = 1 when camera.scale == ZOOM_OUT_MIN
+    const denom = (CAMERA_DEFAULT - ZOOM_OUT_MIN) || 1e-6;
+    const t = clamp((CAMERA_DEFAULT - camera.scale) / denom, 0, 1);
+    const ease = smoothstep(t);
+
+    // if almost invisible, skip drawing (performance)
+    if(ease < 0.02) return;
+
+    // stronger visual response when zoomed out:
+    // alpha multiplier (clouds get more opaque when zoomed out)
+    const alphaMul = lerp(0.0, 1.15, ease);       // makes clouds MUCH more visible at full zoom-out
+    // size multiplier (cloud sprites scale up so 16x16 reads as soft clouds)
+    const sizeMul = lerp(0.9, 2.6, ease);         // bigger when zoomed out
+    // parallax factor (closer to 0 => far away; change with zoom)
+    const parallax = lerp(0.78, 0.18, ease);
 
     // transform so clouds are in world-space but with parallax
     const S = camera.scale * DPR * parallax;
@@ -743,31 +749,48 @@ class CloudLayer {
     ctx.save();
     ctx.setTransform(S, 0, 0, S, tx, ty);
     ctx.imageSmoothingEnabled = false;
-    // draw only visible clouds (in world coords)
+
+    // visible world rectangle in the cloud-layer's transformed space
     const invS = 1 / S;
-    const leftWorld = -tx * invS - 64;
-    const topWorld = -ty * invS - 64;
-    const rightWorld = leftWorld + canvasW * DPR * invS + 128;
-    const bottomWorld = topWorld + canvasH * DPR * invS + 128;
+    const leftWorld = -tx * invS - 128;
+    const topWorld = -ty * invS - 128;
+    const rightWorld = leftWorld + canvasW * DPR * invS + 256;
+    const bottomWorld = topWorld + canvasH * DPR * invS + 256;
 
     const imgW = this.img.width, imgH = this.img.height;
 
+    // draw each cloud (drawn more boldly when zoomed out)
     for(const c of this.clouds){
       // modest per-cloud movement (phase + global offset)
       const cx = c.x + Math.sin(this.time * 0.1 + c.phase) * 6 + this.offsetX * 0.06;
       const cy = c.y + Math.cos(this.time * 0.07 + c.phase) * 2;
 
-      if(cx + imgW * c.scale * globalScaleMul < leftWorld || cx - imgW * c.scale * globalScaleMul > rightWorld) continue;
-      if(cy + imgH * c.scale * globalScaleMul < topWorld || cy - imgH * c.scale * globalScaleMul > bottomWorld) continue;
+      // bounding quick-reject
+      const maxSize = imgW * c.scale * sizeMul * 1.6;
+      if(cx + maxSize < leftWorld || cx - maxSize > rightWorld) continue;
+      if(cy + maxSize < topWorld || cy - maxSize > bottomWorld) continue;
 
-      const worldScale = c.scale * globalScaleMul;
-      ctx.globalAlpha = c.alpha * alphaMul;
-      // draw a cluster of 4 sprites slightly offset to make clouds feel less tiled
+      const worldScale = c.scale * sizeMul;
+
+      // layered draws to make clouds read as larger, softer blobs when zoomed out
+      const baseAlpha = c.alpha * alphaMul;
+      ctx.globalAlpha = baseAlpha;
+      // main cluster
       const s = imgW * worldScale;
       ctx.drawImage(this.img, cx - s * 0.5, cy - s * 0.5, s, s);
-      ctx.drawImage(this.img, cx + s * 0.3, cy - s * 0.15, s * 0.9, s * 0.9);
-      ctx.drawImage(this.img, cx - s * 0.45, cy + s * 0.25, s * 0.85, s * 0.85);
+      // supplemental softer layers (slightly larger, lower alpha) — helps hide tiling
+      ctx.globalAlpha = baseAlpha * 0.62;
+      ctx.drawImage(this.img, cx + s * 0.28, cy - s * 0.12, s * 0.92, s * 0.92);
+      ctx.drawImage(this.img, cx - s * 0.44, cy + s * 0.22, s * 0.84, s * 0.84);
+
+      // when fully zoomed out, draw a faint, larger halo to sell the far-cloud look
+      if(ease > 0.6){
+        ctx.globalAlpha = baseAlpha * (0.22 + (ease - 0.6) * 0.6);
+        const haloS = s * (1.6 + (ease - 0.6) * 1.4);
+        ctx.drawImage(this.img, cx - haloS * 0.5, cy - haloS * 0.5, haloS, haloS);
+      }
     }
+
     ctx.globalAlpha = 1;
     ctx.restore();
   }
@@ -828,8 +851,7 @@ function render(dt){
     ctx.fillStyle = rg; ctx.beginPath(); ctx.arc(sunX, sunY, r*2.5,0,Math.PI*2); ctx.fill();
   }
 
-  // --- draw clouds behind the world (gives a "far away" feel) ---
-  // Option: draw clouds behind world: call cloudLayer.draw() now.
+  // --- draw clouds behind the world (visible when zoomed out) ---
   if(cloudLayer) cloudLayer.draw(ctx, camera);
 
   // draw world and game-space stuff with camera transform
@@ -854,8 +876,6 @@ function render(dt){
   for(let y=top;y<=bottom;y++){ ctx.beginPath(); ctx.moveTo(left*TILE, y*TILE); ctx.lineTo(right*TILE, y*TILE); ctx.stroke(); }
   ctx.restore();
 
-  // NOTE: you can also draw clouds on top of the world by calling cloudLayer.draw(ctx,camera) here instead.
-
   // overlay darkness (screen-space)
   ctx.setTransform(1,0,0,1,0,0);
   // make night less dark: cap maximum darkness to ~0.5 instead of near-black
@@ -879,10 +899,7 @@ function render(dt){
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
   }
-
-  // NOTE: per request, we do NOT draw a moon or any bright object on top of the scene — it should not be seeable at night.
 }
-
 
 // ========== START GAME ==========
 function startGame(){
@@ -915,7 +932,7 @@ function startGame(){
   camera = new Camera(player.x, player.y, CAMERA_DEFAULT);
   input = new Input(canvas);
 
-  // create cloud layer (uses Cloud.png)
+  // create cloud layer (uses Cloud.png) — clouds become visible when you zoom out
   if(cloudImg && cloudImg.complete){
     cloudLayer = new CloudLayer(cloudImg, MAP_W, MAP_H, world.seed ^ 0xC0FFEE);
   } else {
